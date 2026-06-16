@@ -1,0 +1,3632 @@
+<!DOCTYPE html>
+<html lang="en" data-theme="light" data-font-size="medium" data-font-family="serif">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<meta name="description" content="WebRSS — offline-first RSS/Atom reader with Nostr sync">
+<title>WebRSS</title>
+<meta name="theme-color" content="#ffffff">
+<link rel="manifest" href="manifest.json">
+
+<!-- noble/secp256k1 for Nostr signing.
+     Loaded as an ES module and exposed on window so the rest of the
+     (non-module) script can reach it via window.nobleSecp256k1.
+     SHA-256 is done with the built-in WebCrypto API, so no hashes lib needed. -->
+<script type="module">
+  import * as nobleSecp256k1 from 'https://cdn.jsdelivr.net/npm/@noble/secp256k1@1.7.1/+esm';
+  window.nobleSecp256k1 = nobleSecp256k1;
+  window.dispatchEvent(new Event('secp-ready'));
+</script>
+
+<style>
+/* ============================================================
+   CSS CUSTOM PROPERTIES — THEMES
+   ============================================================ */
+:root {
+  --bg:         #f9f7f4;
+  --bg-panel:   #ffffff;
+  --bg-hover:   #f0ede8;
+  --bg-active:  #e8e3db;
+  --border:     #d4cdc5;
+  --text:       #2c2824;
+  --text-muted: #7a7067;
+  --accent:     #2563eb;
+  --accent-dim: #dbeafe;
+  --danger:     #dc2626;
+  --yellow:     #fef08a;
+  --yellow-dark:#ca8a04;
+  --green:      #bbf7d0;
+  --green-dark: #16a34a;
+  --pink:       #fbcfe8;
+  --pink-dark:  #be185d;
+  --shadow:     0 1px 3px rgba(0,0,0,.1), 0 1px 2px rgba(0,0,0,.06);
+  --radius:     6px;
+  --sidebar-w:  260px;
+  --list-w:     340px;
+  color-scheme: light;
+}
+
+[data-theme="dark"] {
+  --bg:         #1a1814;
+  --bg-panel:   #221f1a;
+  --bg-hover:   #2d2924;
+  --bg-active:  #38332d;
+  --border:     #3d3830;
+  --text:       #e8e0d4;
+  --text-muted: #8a8078;
+  --accent:     #60a5fa;
+  --accent-dim: #1e3a5f;
+  --danger:     #f87171;
+  --yellow:     #854d0e;
+  --yellow-dark:#fef08a;
+  --green:      #14532d;
+  --green-dark: #bbf7d0;
+  --pink:       #831843;
+  --pink-dark:  #fbcfe8;
+  color-scheme: dark;
+}
+
+[data-font-family="serif"]     { --font: Georgia, "Times New Roman", serif; }
+[data-font-family="sans"]      { --font: system-ui, -apple-system, sans-serif; }
+[data-font-family="mono"]      { --font: "Courier New", Courier, monospace; }
+[data-font-size="small"]       { --fsize: 14px; --lheight: 1.6; }
+[data-font-size="medium"]      { --fsize: 16px; --lheight: 1.7; }
+[data-font-size="large"]       { --fsize: 19px; --lheight: 1.8; }
+[data-font-size="xlarge"]      { --fsize: 22px; --lheight: 1.9; }
+
+/* ============================================================
+   RESET + BASE
+   ============================================================ */
+*, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+html, body {
+  height: 100%;
+  overflow: hidden;
+  background: var(--bg);
+  color: var(--text);
+  font-family: var(--font, system-ui, sans-serif);
+  font-size: var(--fsize, 16px);
+  line-height: var(--lheight, 1.7);
+}
+
+button {
+  cursor: pointer;
+  border: 1px solid var(--border);
+  background: var(--bg-panel);
+  color: var(--text);
+  font: inherit;
+  border-radius: var(--radius);
+  padding: .35em .75em;
+  transition: background .12s, border-color .12s;
+}
+button:hover  { background: var(--bg-hover); }
+button:active { background: var(--bg-active); }
+button.primary {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: #fff;
+}
+button.primary:hover { opacity: .88; }
+button.ghost {
+  border-color: transparent;
+  background: transparent;
+}
+button.ghost:hover { background: var(--bg-hover); }
+button.danger { color: var(--danger); border-color: var(--danger); }
+
+input, textarea, select {
+  font: inherit;
+  background: var(--bg-panel);
+  color: var(--text);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: .4em .7em;
+  width: 100%;
+  outline: none;
+  transition: border-color .12s;
+}
+input:focus, textarea:focus, select:focus {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 3px var(--accent-dim);
+}
+
+a { color: var(--accent); text-decoration: none; }
+a:hover { text-decoration: underline; }
+
+svg { display: block; }
+img { max-width: 100%; }
+
+::-webkit-scrollbar { width: 6px; height: 6px; }
+::-webkit-scrollbar-track { background: transparent; }
+::-webkit-scrollbar-thumb { background: var(--border); border-radius: 3px; }
+
+/* ============================================================
+   LAYOUT — THREE PANES
+   ============================================================ */
+#app {
+  display: flex;
+  height: 100vh;
+  overflow: hidden;
+}
+
+/* SIDEBAR */
+#sidebar {
+  width: var(--sidebar-w);
+  flex-shrink: 0;
+  display: flex;
+  flex-direction: column;
+  background: var(--bg-panel);
+  border-right: 1px solid var(--border);
+  overflow: hidden;
+}
+
+#sidebar-header {
+  padding: 12px;
+  border-bottom: 1px solid var(--border);
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+#logo {
+  font-weight: 700;
+  font-size: 1.1em;
+  letter-spacing: -.02em;
+  color: var(--accent);
+  flex: 1;
+}
+
+#sidebar-actions {
+  display: flex;
+  gap: 4px;
+}
+
+#feed-list-container {
+  flex: 1;
+  overflow-y: auto;
+  padding: 8px 0;
+}
+
+.feed-group-header {
+  padding: 6px 14px 2px;
+  font-size: .7em;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: .08em;
+  color: var(--text-muted);
+  cursor: default;
+}
+
+.feed-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 14px;
+  cursor: pointer;
+  border-radius: 0;
+  transition: background .1s;
+  position: relative;
+}
+.feed-item:hover    { background: var(--bg-hover); }
+.feed-item.active   { background: var(--bg-active); }
+.feed-item.special  { font-style: normal; }
+
+.feed-favicon {
+  width: 16px; height: 16px;
+  border-radius: 3px;
+  flex-shrink: 0;
+  object-fit: contain;
+}
+.feed-favicon-placeholder {
+  width: 16px; height: 16px;
+  border-radius: 3px;
+  background: var(--accent-dim);
+  flex-shrink: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.feed-title {
+  flex: 1;
+  font-size: .88em;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.feed-unread-count {
+  font-size: .72em;
+  background: var(--accent);
+  color: #fff;
+  border-radius: 9px;
+  padding: 1px 6px;
+  flex-shrink: 0;
+  font-weight: 600;
+}
+
+#sidebar-footer {
+  border-top: 1px solid var(--border);
+  padding: 8px;
+}
+
+#user-info {
+  font-size: .75em;
+  color: var(--text-muted);
+  padding: 2px 4px;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  overflow: hidden;
+}
+#user-npub {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  flex: 1;
+}
+
+/* ARTICLE LIST */
+#article-list-panel {
+  width: var(--list-w);
+  flex-shrink: 0;
+  display: flex;
+  flex-direction: column;
+  border-right: 1px solid var(--border);
+  background: var(--bg);
+  overflow: hidden;
+}
+
+#list-header {
+  padding: 10px 12px 8px;
+  border-bottom: 1px solid var(--border);
+  background: var(--bg-panel);
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+#list-title {
+  font-weight: 700;
+  font-size: .95em;
+}
+
+#search-bar {
+  position: relative;
+}
+#search-input {
+  padding-left: 2em;
+  font-size: .85em;
+}
+#search-icon {
+  position: absolute;
+  left: .5em;
+  top: 50%;
+  transform: translateY(-50%);
+  color: var(--text-muted);
+  pointer-events: none;
+}
+
+#list-tabs {
+  display: flex;
+  gap: 4px;
+}
+.list-tab {
+  font-size: .8em;
+  padding: .2em .6em;
+  border-radius: 9px;
+  border: 1px solid transparent;
+  background: transparent;
+  color: var(--text-muted);
+  cursor: pointer;
+  transition: all .12s;
+}
+.list-tab.active {
+  background: var(--accent);
+  color: #fff;
+  border-color: var(--accent);
+}
+
+#article-list {
+  flex: 1;
+  overflow-y: auto;
+}
+
+.article-item {
+  padding: 10px 14px;
+  border-bottom: 1px solid var(--border);
+  cursor: pointer;
+  transition: background .1s;
+  position: relative;
+}
+.article-item:hover  { background: var(--bg-hover); }
+.article-item.active { background: var(--bg-active); }
+.article-item.read   { opacity: .65; }
+
+.article-item-feed {
+  font-size: .7em;
+  color: var(--accent);
+  font-weight: 600;
+  margin-bottom: 2px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.article-item-title {
+  font-size: .88em;
+  font-weight: 600;
+  line-height: 1.3;
+  margin-bottom: 3px;
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+.article-item.read .article-item-title { font-weight: 400; }
+
+.article-item-meta {
+  font-size: .72em;
+  color: var(--text-muted);
+  display: flex;
+  gap: 6px;
+}
+
+.unread-dot {
+  position: absolute;
+  left: 4px;
+  top: 50%;
+  transform: translateY(-50%);
+  width: 6px; height: 6px;
+  background: var(--accent);
+  border-radius: 50%;
+}
+
+#list-empty {
+  padding: 40px 20px;
+  text-align: center;
+  color: var(--text-muted);
+  font-size: .9em;
+}
+
+/* READING PANE */
+#reading-pane {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  background: var(--bg);
+}
+
+#reader-toolbar {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 8px 16px;
+  border-bottom: 1px solid var(--border);
+  background: var(--bg-panel);
+  flex-wrap: wrap;
+}
+
+#reader-toolbar .spacer { flex: 1; }
+
+.toolbar-group {
+  display: flex;
+  gap: 4px;
+  align-items: center;
+}
+
+.toolbar-sep {
+  width: 1px;
+  height: 18px;
+  background: var(--border);
+  margin: 0 4px;
+}
+
+#highlight-color-picker {
+  display: flex;
+  gap: 4px;
+}
+.hl-color {
+  width: 20px; height: 20px;
+  border-radius: 50%;
+  border: 2px solid transparent;
+  cursor: pointer;
+  transition: border-color .1s, transform .1s;
+}
+.hl-color:hover   { transform: scale(1.15); }
+.hl-color.active  { border-color: var(--text); }
+.hl-color[data-color="yellow"] { background: #fef08a; }
+.hl-color[data-color="green"]  { background: #bbf7d0; }
+.hl-color[data-color="pink"]   { background: #fbcfe8; }
+
+#reader-content {
+  flex: 1;
+  overflow-y: auto;
+  padding: 32px;
+  max-width: 780px;
+  width: 100%;
+  margin: 0 auto;
+}
+
+#reader-placeholder {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  height: 100%;
+  color: var(--text-muted);
+  gap: 12px;
+  padding: 40px;
+  text-align: center;
+}
+#reader-placeholder svg { opacity: .25; }
+
+#article-header { margin-bottom: 24px; }
+#article-title {
+  font-size: 1.5em;
+  font-weight: 700;
+  line-height: 1.3;
+  margin-bottom: 10px;
+  color: var(--text);
+}
+#article-meta {
+  font-size: .8em;
+  color: var(--text-muted);
+  display: flex;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+#article-feed-name { color: var(--accent); font-weight: 600; }
+
+#article-body {
+  color: var(--text);
+  font-size: 1em;
+  line-height: var(--lheight, 1.7);
+}
+#article-body h1,
+#article-body h2,
+#article-body h3 {
+  margin: 1.4em 0 .5em;
+  line-height: 1.3;
+}
+#article-body p  { margin: .8em 0; }
+#article-body img { border-radius: var(--radius); margin: .5em 0; }
+#article-body pre, #article-body code {
+  font-family: "Courier New", monospace;
+  font-size: .88em;
+  background: var(--bg-active);
+  border-radius: 4px;
+}
+#article-body pre  { padding: 12px; overflow-x: auto; margin: .8em 0; }
+#article-body code { padding: 1px 4px; }
+#article-body pre code { padding: 0; background: none; }
+#article-body blockquote {
+  border-left: 3px solid var(--accent);
+  padding-left: 1em;
+  margin: .8em 0;
+  color: var(--text-muted);
+}
+#article-body a { color: var(--accent); }
+#article-body ul, #article-body ol { margin: .6em 0; padding-left: 1.4em; }
+#article-body li { margin: .2em 0; }
+#article-body table { border-collapse: collapse; width: 100%; margin: .8em 0; }
+#article-body td, #article-body th {
+  border: 1px solid var(--border);
+  padding: 6px 10px;
+  text-align: left;
+}
+#article-body th { background: var(--bg-active); font-weight: 600; }
+
+/* HIGHLIGHTS */
+mark {
+  border-radius: 2px;
+  cursor: pointer;
+  transition: opacity .12s;
+}
+mark:hover { opacity: .8; }
+mark[data-color="yellow"] { background: #fef08a; color: #78350f; }
+mark[data-color="green"]  { background: #bbf7d0; color: #14532d; }
+mark[data-color="pink"]   { background: #fbcfe8; color: #831843; }
+[data-theme="dark"] mark[data-color="yellow"] { background: #713f12; color: #fef9c3; }
+[data-theme="dark"] mark[data-color="green"]  { background: #14532d; color: #dcfce7; }
+[data-theme="dark"] mark[data-color="pink"]   { background: #831843; color: #fdf2f8; }
+
+/* ANNOTATION POPUP */
+#annotation-popup {
+  position: fixed;
+  background: var(--bg-panel);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 12px;
+  box-shadow: var(--shadow), 0 4px 16px rgba(0,0,0,.15);
+  z-index: 1000;
+  min-width: 260px;
+  max-width: 360px;
+  display: none;
+  flex-direction: column;
+  gap: 8px;
+}
+#annotation-popup.visible { display: flex; }
+#annotation-popup textarea {
+  resize: vertical;
+  min-height: 70px;
+  font-size: .88em;
+}
+#annotation-popup-actions {
+  display: flex;
+  gap: 6px;
+  justify-content: flex-end;
+}
+
+/* HIGHLIGHT TOOLTIP */
+#selection-tooltip {
+  position: fixed;
+  background: var(--text);
+  color: var(--bg);
+  border-radius: var(--radius);
+  padding: 4px 8px;
+  font-size: .75em;
+  display: none;
+  gap: 6px;
+  z-index: 1001;
+  box-shadow: var(--shadow);
+}
+#selection-tooltip.visible { display: flex; }
+#selection-tooltip button {
+  background: transparent;
+  border: none;
+  color: inherit;
+  font: inherit;
+  font-size: .9em;
+  cursor: pointer;
+  padding: 2px;
+}
+#selection-tooltip button:hover { opacity: .75; }
+
+/* ANNOTATIONS SIDEBAR */
+#annotations-panel {
+  width: 280px;
+  flex-shrink: 0;
+  border-left: 1px solid var(--border);
+  background: var(--bg-panel);
+  display: none;
+  flex-direction: column;
+  overflow: hidden;
+}
+#annotations-panel.visible { display: flex; }
+#annotations-header {
+  padding: 10px 14px;
+  border-bottom: 1px solid var(--border);
+  font-weight: 700;
+  font-size: .9em;
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+}
+#annotations-list {
+  flex: 1;
+  overflow-y: auto;
+  padding: 8px;
+}
+.annotation-card {
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 8px 10px;
+  margin-bottom: 8px;
+  font-size: .82em;
+}
+.annotation-quote {
+  font-style: italic;
+  color: var(--text-muted);
+  border-left: 3px solid var(--border);
+  padding-left: 6px;
+  margin-bottom: 4px;
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+.annotation-note { color: var(--text); }
+.annotation-actions {
+  display: flex;
+  gap: 4px;
+  margin-top: 6px;
+  justify-content: flex-end;
+}
+
+/* ============================================================
+   MODALS
+   ============================================================ */
+.modal-overlay {
+  position: fixed;
+  inset: 0;
+  background: rgba(0,0,0,.45);
+  z-index: 2000;
+  display: none;
+  align-items: center;
+  justify-content: center;
+  padding: 20px;
+}
+.modal-overlay.visible { display: flex; }
+
+.modal {
+  background: var(--bg-panel);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 24px;
+  width: 100%;
+  max-width: 480px;
+  box-shadow: 0 20px 60px rgba(0,0,0,.3);
+  max-height: 90vh;
+  overflow-y: auto;
+}
+.modal h2 {
+  font-size: 1.1em;
+  font-weight: 700;
+  margin-bottom: 16px;
+}
+.modal-actions {
+  display: flex;
+  gap: 8px;
+  justify-content: flex-end;
+  margin-top: 20px;
+}
+.form-group {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  margin-bottom: 14px;
+}
+.form-group label {
+  font-size: .82em;
+  font-weight: 600;
+  color: var(--text-muted);
+}
+.form-group input {
+  font-size: .9em;
+}
+.form-hint {
+  font-size: .75em;
+  color: var(--text-muted);
+  margin-top: 2px;
+}
+
+/* LOGIN SCREEN */
+#login-screen {
+  position: fixed;
+  inset: 0;
+  background: var(--bg);
+  z-index: 3000;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 24px;
+}
+#login-screen.hidden { display: none; }
+
+.login-card {
+  background: var(--bg-panel);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  padding: 32px;
+  width: 100%;
+  max-width: 420px;
+  box-shadow: 0 20px 60px rgba(0,0,0,.15);
+}
+.login-card h1 {
+  font-size: 1.4em;
+  font-weight: 800;
+  color: var(--accent);
+  margin-bottom: 4px;
+}
+.login-card .subtitle {
+  color: var(--text-muted);
+  font-size: .88em;
+  margin-bottom: 24px;
+}
+.login-tabs {
+  display: flex;
+  gap: 0;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  overflow: hidden;
+  margin-bottom: 20px;
+}
+.login-tab {
+  flex: 1;
+  padding: .5em;
+  font-size: .88em;
+  font-weight: 600;
+  border: none;
+  border-radius: 0;
+  background: transparent;
+  color: var(--text-muted);
+  transition: all .12s;
+}
+.login-tab.active {
+  background: var(--accent);
+  color: #fff;
+}
+
+#generated-nsec-box {
+  display: none;
+  background: var(--bg-active);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 10px 12px;
+  margin: 12px 0;
+  font-size: .82em;
+  word-break: break-all;
+  font-family: monospace;
+  color: var(--text);
+}
+#generated-nsec-box.visible { display: block; }
+
+/* SETTINGS */
+#settings-modal .setting-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 10px 0;
+  border-bottom: 1px solid var(--border);
+  gap: 12px;
+}
+#settings-modal .setting-row:last-child { border-bottom: none; }
+#settings-modal .setting-label { font-size: .9em; font-weight: 500; }
+#settings-modal .setting-desc { font-size: .77em; color: var(--text-muted); }
+
+.toggle-group {
+  display: flex;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  overflow: hidden;
+}
+.toggle-btn {
+  padding: .3em .65em;
+  font-size: .8em;
+  border: none;
+  border-radius: 0;
+  background: transparent;
+  color: var(--text-muted);
+  cursor: pointer;
+  transition: all .1s;
+}
+.toggle-btn.active {
+  background: var(--accent);
+  color: #fff;
+}
+
+/* NOTIFICATIONS */
+#toast-container {
+  position: fixed;
+  bottom: 20px;
+  right: 20px;
+  z-index: 5000;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  max-width: 340px;
+}
+.toast {
+  background: var(--bg-panel);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 10px 14px;
+  font-size: .85em;
+  box-shadow: var(--shadow);
+  animation: slide-in .2s ease;
+}
+.toast.success { border-left: 3px solid #16a34a; }
+.toast.error   { border-left: 3px solid var(--danger); }
+.toast.info    { border-left: 3px solid var(--accent); }
+
+@keyframes slide-in {
+  from { transform: translateX(20px); opacity: 0; }
+  to   { transform: translateX(0);    opacity: 1; }
+}
+
+/* LOADING SPINNER */
+.spinner {
+  width: 18px; height: 18px;
+  border: 2px solid var(--border);
+  border-top-color: var(--accent);
+  border-radius: 50%;
+  animation: spin .7s linear infinite;
+  display: inline-block;
+}
+@keyframes spin { to { transform: rotate(360deg); } }
+
+/* OFFLINE INDICATOR */
+#offline-banner {
+  display: none;
+  background: #f59e0b;
+  color: #451a03;
+  padding: 4px 16px;
+  font-size: .8em;
+  font-weight: 600;
+  text-align: center;
+}
+#offline-banner.visible { display: block; }
+
+/* FONT SIZE PICKER BUTTONS */
+.font-size-btn { font-weight: 600; }
+.font-size-btn[data-size="small"]  { font-size: .75em; }
+.font-size-btn[data-size="medium"] { font-size: .88em; }
+.font-size-btn[data-size="large"]  { font-size: 1em; }
+.font-size-btn[data-size="xlarge"] { font-size: 1.1em; }
+
+/* PROGRESS BAR */
+#sync-progress {
+  height: 2px;
+  background: transparent;
+  position: fixed;
+  top: 0; left: 0; right: 0;
+  z-index: 9999;
+}
+#sync-progress-bar {
+  height: 100%;
+  background: var(--accent);
+  width: 0%;
+  transition: width .3s ease;
+}
+
+/* RESPONSIVE COLLAPSE */
+@media (max-width: 900px) {
+  #sidebar { width: 220px; }
+  :root { --list-w: 280px; }
+}
+@media (max-width: 700px) {
+  #sidebar, #article-list-panel { display: none; }
+  #sidebar.mobile-visible,
+  #article-list-panel.mobile-visible { display: flex; position: fixed; z-index: 100; height: 100%; }
+  #sidebar.mobile-visible { width: 270px; }
+  #article-list-panel.mobile-visible { width: calc(100% - 270px); left: 270px; }
+}
+
+/* CONTEXT MENU */
+#context-menu {
+  position: fixed;
+  background: var(--bg-panel);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  box-shadow: var(--shadow);
+  z-index: 3000;
+  display: none;
+  min-width: 160px;
+  padding: 4px 0;
+}
+#context-menu.visible { display: block; }
+.ctx-item {
+  padding: 7px 14px;
+  font-size: .85em;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.ctx-item:hover { background: var(--bg-hover); }
+.ctx-sep { height: 1px; background: var(--border); margin: 4px 0; }
+
+/* ============================================================
+   TAGS / FOLDER PANEL (right side)
+   ============================================================ */
+#tags-panel {
+  width: 220px;
+  flex-shrink: 0;
+  display: flex;
+  flex-direction: column;
+  border-left: 1px solid var(--border);
+  background: var(--bg-panel);
+  overflow: hidden;
+  transition: width .2s;
+}
+#tags-panel.collapsed { width: 36px; }
+#tags-panel-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 10px 10px 8px;
+  border-bottom: 1px solid var(--border);
+  gap: 4px;
+  min-height: 44px;
+}
+#tags-panel-header .panel-title {
+  font-size: .82em;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: .06em;
+  color: var(--text-muted);
+  white-space: nowrap;
+  overflow: hidden;
+}
+#tags-panel.collapsed #tags-panel-header .panel-title { display: none; }
+#tags-panel.collapsed .tag-add-row { display: none; }
+#tags-panel.collapsed #tags-list { display: none; }
+
+.tag-item {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 10px;
+  cursor: pointer;
+  border-radius: 0;
+  font-size: .83em;
+  transition: background .1s;
+  position: relative;
+}
+.tag-item:hover  { background: var(--bg-hover); }
+.tag-item.active { background: var(--bg-active); }
+
+.tag-dot {
+  width: 10px; height: 10px;
+  border-radius: 50%;
+  flex-shrink: 0;
+}
+.tag-name {
+  flex: 1;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.tag-count {
+  font-size: .72em;
+  color: var(--text-muted);
+  flex-shrink: 0;
+}
+
+.tag-special {
+  font-style: italic;
+  color: var(--accent);
+}
+
+.tag-add-row {
+  padding: 6px 8px;
+  display: flex;
+  gap: 5px;
+  border-top: 1px solid var(--border);
+}
+.tag-add-row input {
+  font-size: .8em;
+  padding: .3em .5em;
+}
+.tag-add-row button {
+  font-size: .8em;
+  padding: .3em .6em;
+  flex-shrink: 0;
+}
+
+/* Tag pill on article items */
+.tag-pills {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 3px;
+  margin-top: 3px;
+}
+.tag-pill {
+  font-size: .65em;
+  padding: 1px 5px;
+  border-radius: 9px;
+  color: #fff;
+  font-weight: 600;
+}
+
+/* LLM SUMMARY BAR */
+#article-summary-bar {
+  background: var(--bg-active);
+  border-bottom: 1px solid var(--border);
+  padding: 8px 32px 8px;
+  font-size: .82em;
+  color: var(--text-muted);
+  display: none;
+  gap: 8px;
+  align-items: flex-start;
+}
+#article-summary-bar.visible { display: flex; }
+#summary-label {
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: .05em;
+  font-size: .75em;
+  color: var(--accent);
+  white-space: nowrap;
+  padding-top: 1px;
+}
+#summary-text {
+  flex: 1;
+  line-height: 1.5;
+}
+#summary-generate-btn {
+  font-size: .75em;
+  padding: .2em .6em;
+  white-space: nowrap;
+  flex-shrink: 0;
+}
+
+/* TODAY / THIS WEEK DIGEST */
+.digest-list {
+  list-style: none;
+  padding: 0;
+  margin: 0;
+}
+.digest-list li {
+  padding: 8px 12px;
+  border-bottom: 1px solid var(--border);
+  font-size: .9em;
+  cursor: pointer;
+  transition: background .1s;
+  display: flex;
+  gap: 8px;
+  align-items: flex-start;
+}
+.digest-list li:hover { background: var(--bg-hover); }
+.digest-list li::before {
+  content: "•";
+  color: var(--accent);
+  font-weight: 700;
+  flex-shrink: 0;
+}
+#llm-settings-row {
+  padding: 8px 10px;
+  font-size: .78em;
+  color: var(--text-muted);
+  border-top: 1px solid var(--border);
+  word-break: break-all;
+}
+
+/* TAG ASSIGNMENTS on article via right-click */
+.tag-checkbox-list {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  max-height: 200px;
+  overflow-y: auto;
+}
+.tag-checkbox-list label {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: .85em;
+  cursor: pointer;
+}
+.tag-checkbox-list input[type="checkbox"] {
+  width: auto;
+  flex-shrink: 0;
+}
+</style>
+</head>
+<body>
+
+<!-- ============================================================
+     OFFLINE BANNER
+     ============================================================ -->
+<div id="offline-banner">⚠ You are offline — showing cached content</div>
+
+<!-- SYNC PROGRESS LINE -->
+<div id="sync-progress"><div id="sync-progress-bar"></div></div>
+
+<!-- ============================================================
+     LOGIN SCREEN
+     ============================================================ -->
+<div id="login-screen">
+  <div class="login-card">
+    <h1>WebRSS</h1>
+    <p class="subtitle">Offline-first RSS reader with Nostr sync</p>
+
+    <div class="login-tabs">
+      <button class="login-tab active" id="tab-login" onclick="switchLoginTab('login')">Sign in with NSEC</button>
+      <button class="login-tab" id="tab-generate" onclick="switchLoginTab('generate')">Generate new key</button>
+    </div>
+
+    <!-- LOGIN FORM -->
+    <div id="login-form">
+      <div class="form-group">
+        <label for="nsec-input">Your NSEC private key</label>
+        <input type="password" id="nsec-input" placeholder="nsec1…" autocomplete="off" spellcheck="false">
+        <span class="form-hint">Never share your NSEC with anyone. It stays in your browser only.</span>
+      </div>
+      <button class="primary" style="width:100%" onclick="doLogin()">Sign in</button>
+    </div>
+
+    <!-- GENERATE FORM -->
+    <div id="generate-form" style="display:none">
+      <p style="font-size:.88em;color:var(--text-muted);margin-bottom:12px">
+        A new Nostr keypair will be generated in your browser. Copy the NSEC and store it safely — you'll need it to log in again.
+      </p>
+      <button class="primary" style="width:100%;margin-bottom:8px" onclick="doGenerate()">Generate key</button>
+      <div id="generated-nsec-box"></div>
+      <div id="generated-copy-row" style="display:none;gap:8px;justify-content:center">
+        <button onclick="copyNsec()">Copy NSEC</button>
+        <button class="primary" onclick="doLoginWithGenerated()">Continue →</button>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- ============================================================
+     MAIN APP
+     ============================================================ -->
+<div id="app" style="display:none">
+
+  <!-- SIDEBAR -->
+  <nav id="sidebar">
+    <div id="sidebar-header">
+      <span id="logo">WebRSS</span>
+      <div id="sidebar-actions">
+        <button class="ghost" title="Add feed" onclick="showAddFeedModal()" id="btn-add-feed">
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>
+        </button>
+        <button class="ghost" title="Import OPML" onclick="importOPML()">
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><path d="M21 15v4a2 2 0 01-2 2H5a2 2 0 01-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/></svg>
+        </button>
+        <button class="ghost" title="Settings" onclick="showSettings()">
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 00.33 1.82l.06.06a2 2 0 010 2.83 2 2 0 01-2.83 0l-.06-.06a1.65 1.65 0 00-1.82-.33 1.65 1.65 0 00-1 1.51V21a2 2 0 01-4 0v-.09A1.65 1.65 0 009 19.4a1.65 1.65 0 00-1.82.33l-.06.06a2 2 0 01-2.83 0 2 2 0 010-2.83l.06-.06A1.65 1.65 0 004.68 15a1.65 1.65 0 00-1.51-1H3a2 2 0 010-4h.09A1.65 1.65 0 004.6 9a1.65 1.65 0 00-.33-1.82l-.06-.06a2 2 0 010-2.83 2 2 0 012.83 0l.06.06A1.65 1.65 0 009 4.68a1.65 1.65 0 001-1.51V3a2 2 0 014 0v.09a1.65 1.65 0 001 1.51 1.65 1.65 0 001.82-.33l.06-.06a2 2 0 012.83 0 2 2 0 010 2.83l-.06.06A1.65 1.65 0 0019.4 9a1.65 1.65 0 001.51 1H21a2 2 0 010 4h-.09a1.65 1.65 0 00-1.51 1z"/></svg>
+        </button>
+      </div>
+    </div>
+
+    <div id="feed-list-container">
+      <!-- Special items -->
+      <div class="feed-item special active" data-feed="all" onclick="selectFeed('all', this)">
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M3 9l9-7 9 7v11a2 2 0 01-2 2H5a2 2 0 01-2-2z"/></svg>
+        <span class="feed-title">All Articles</span>
+        <span class="feed-unread-count" id="all-unread-count" style="display:none"></span>
+      </div>
+      <div class="feed-item special" data-feed="starred" onclick="selectFeed('starred', this)">
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polygon points="12 2 15.09 8.26 22 9.27 17 14.14 18.18 21.02 12 17.77 5.82 21.02 7 14.14 2 9.27 8.91 8.26 12 2"/></svg>
+        <span class="feed-title">Starred</span>
+      </div>
+      <div class="feed-item special" data-feed="archive" onclick="selectFeed('archive', this)">
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="21 8 21 21 3 21 3 8"/><rect x="1" y="3" width="22" height="5"/><line x1="10" y1="12" x2="14" y2="12"/></svg>
+        <span class="feed-title">Archive</span>
+      </div>
+
+      <div class="feed-group-header" style="margin-top:8px">Feeds</div>
+      <div id="feed-list">
+        <!-- Dynamic feed items go here -->
+      </div>
+    </div>
+
+    <div id="sidebar-footer">
+      <div id="user-info">
+        <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="7" r="4"/><path d="M20 21v-2a8 8 0 00-16 0v2"/></svg>
+        <span id="user-npub">—</span>
+      </div>
+    </div>
+  </nav>
+
+  <!-- ARTICLE LIST PANE -->
+  <div id="article-list-panel">
+    <div id="list-header">
+      <div id="list-title">All Articles</div>
+      <div id="search-bar">
+        <svg id="search-icon" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg>
+        <input type="search" id="search-input" placeholder="Search all articles…" oninput="onSearch(this.value)">
+      </div>
+      <div id="list-tabs">
+        <button class="list-tab active" data-tab="unread" onclick="switchTab('unread',this)">Unread</button>
+        <button class="list-tab" data-tab="all" onclick="switchTab('all',this)">All</button>
+        <button class="list-tab" data-tab="read" onclick="switchTab('read',this)">Read</button>
+      </div>
+    </div>
+    <div id="article-list">
+      <div id="list-empty">
+        <svg width="40" height="40" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M4 19.5A2.5 2.5 0 016.5 17H20"/><path d="M6.5 2H20v20H6.5A2.5 2.5 0 014 19.5v-15A2.5 2.5 0 016.5 2z"/></svg>
+        <p>No articles yet. Add a feed to get started.</p>
+      </div>
+    </div>
+  </div>
+
+  <!-- TAGS / FOLDER PANEL -->
+  <div id="tags-panel">
+    <div id="tags-panel-header">
+      <span class="panel-title">Tags &amp; Folders</span>
+      <button class="ghost" style="padding:2px 4px;flex-shrink:0" id="tags-collapse-btn" onclick="toggleTagsPanel()" title="Collapse">
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><polyline points="15 18 9 12 15 6"/></svg>
+      </button>
+    </div>
+    <div id="tags-list" style="flex:1;overflow-y:auto;padding:6px 0">
+      <!-- Special tags -->
+      <div class="tag-item tag-special" data-tag-id="TODAY" onclick="selectTag('TODAY',this)">
+        <div class="tag-dot" style="background:#f59e0b"></div>
+        <span class="tag-name">Today</span>
+      </div>
+      <div class="tag-item tag-special" data-tag-id="WEEK" onclick="selectTag('WEEK',this)">
+        <div class="tag-dot" style="background:#8b5cf6"></div>
+        <span class="tag-name">This Week</span>
+      </div>
+      <div style="height:1px;background:var(--border);margin:4px 0"></div>
+      <!-- User-created tags injected here -->
+      <div id="user-tags-list"></div>
+    </div>
+    <div id="llm-settings-row">
+      <span style="font-weight:600;color:var(--text-muted)">LLM:</span>
+      <span id="llm-status-text">not configured</span>
+      <button class="ghost" style="font-size:.75em;margin-left:4px;padding:1px 5px" onclick="showLLMSettings()">⚙</button>
+    </div>
+    <div class="tag-add-row">
+      <input type="text" id="new-tag-input" placeholder="New tag…" onkeydown="if(event.key==='Enter')addTag()">
+      <button onclick="addTag()">Add</button>
+    </div>
+  </div>
+
+  <!-- READING PANE -->
+  <div id="reading-pane">
+    <div id="reader-toolbar">
+      <!-- Highlight indicator -->
+      <div style="display:flex;align-items:center;gap:5px;font-size:.78em;color:var(--text-muted)">
+        <span style="width:14px;height:14px;background:#fef08a;border-radius:3px;display:inline-block;border:1px solid #ca8a04"></span>
+        Select text to highlight
+      </div>
+      <div class="toolbar-sep"></div>
+      <!-- View controls -->
+      <div class="toolbar-group">
+        <button class="ghost" title="Mark as read/unread" id="btn-toggle-read" onclick="toggleCurrentRead()">
+          <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/></svg>
+          Read
+        </button>
+        <button class="ghost" title="Star article" id="btn-toggle-star" onclick="toggleCurrentStar()">
+          <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polygon points="12 2 15.09 8.26 22 9.27 17 14.14 18.18 21.02 12 17.77 5.82 21.02 7 14.14 2 9.27 8.91 8.26 12 2"/></svg>
+        </button>
+        <button class="ghost" title="Annotations" id="btn-toggle-annotations" onclick="toggleAnnotationsPanel()">
+          <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 15a2 2 0 01-2 2H7l-4 4V5a2 2 0 012-2h14a2 2 0 012 2z"/></svg>
+        </button>
+        <a id="btn-open-original" href="#" target="_blank" class="ghost" style="display:inline-flex;align-items:center;gap:4px;text-decoration:none;padding:.35em .75em;border:1px solid var(--border);border-radius:var(--radius);font-size:.9em;color:var(--text);" title="Open original article">
+          <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><path d="M18 13v6a2 2 0 01-2 2H5a2 2 0 01-2-2V8a2 2 0 012-2h6"/><polyline points="15 3 21 3 21 9"/><line x1="10" y1="14" x2="21" y2="3"/></svg>
+          Open
+        </a>
+      </div>
+      <div class="spacer"></div>
+      <!-- Appearance controls -->
+      <div class="toolbar-group">
+        <div class="toggle-group" title="Font size">
+          <button class="toggle-btn font-size-btn" data-size="small"  onclick="setFontSize('small')">A</button>
+          <button class="toggle-btn font-size-btn active" data-size="medium" onclick="setFontSize('medium')">A</button>
+          <button class="toggle-btn font-size-btn" data-size="large"  onclick="setFontSize('large')">A</button>
+          <button class="toggle-btn font-size-btn" data-size="xlarge" onclick="setFontSize('xlarge')">A</button>
+        </div>
+        <div class="toggle-group" title="Font family" style="margin-left:4px">
+          <button class="toggle-btn active" data-family="serif"  onclick="setFontFamily('serif')"  style="font-family:Georgia,serif">Aa</button>
+          <button class="toggle-btn" data-family="sans"   onclick="setFontFamily('sans')"   style="font-family:system-ui,sans-serif">Aa</button>
+          <button class="toggle-btn" data-family="mono"   onclick="setFontFamily('mono')"   style="font-family:'Courier New',mono">Aa</button>
+        </div>
+        <button class="ghost" id="btn-dark-mode" title="Toggle dark/light mode" onclick="toggleDarkMode()">
+          <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 12.79A9 9 0 1111.21 3 7 7 0 0021 12.79z"/></svg>
+        </button>
+      </div>
+      <!-- Sync -->
+      <div class="toolbar-sep"></div>
+      <button class="ghost" id="btn-sync" title="Sync to Blossom" onclick="syncNow()">
+        <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="1 4 1 10 7 10"/><polyline points="23 20 23 14 17 14"/><path d="M20.49 9A9 9 0 005.64 5.64L1 10m22 4l-4.64 4.36A9 9 0 013.51 15"/></svg>
+        Sync
+      </button>
+    </div>
+
+    <!-- LLM SUMMARY BAR -->
+    <div id="article-summary-bar">
+      <span id="summary-label">AI Summary</span>
+      <span id="summary-text"></span>
+      <button id="summary-generate-btn" class="ghost" onclick="generateSummary()" title="Generate AI summary">✨ Summarize</button>
+    </div>
+
+    <div id="reader-body" style="display:flex;flex:1;overflow:hidden">
+      <div id="reader-content">
+        <div id="reader-placeholder">
+          <svg width="64" height="64" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.2"><path d="M4 19.5A2.5 2.5 0 016.5 17H20"/><path d="M6.5 2H20v20H6.5A2.5 2.5 0 014 19.5v-15A2.5 2.5 0 016.5 2z"/></svg>
+          <p>Select an article to read</p>
+        </div>
+        <div id="article-view" style="display:none">
+          <div id="article-header">
+            <h1 id="article-title"></h1>
+            <div id="article-meta">
+              <span id="article-feed-name"></span>
+              <span id="article-date"></span>
+              <span id="article-author"></span>
+            </div>
+          </div>
+          <div id="article-body"></div>
+        </div>
+      </div>
+      <!-- ANNOTATIONS PANEL -->
+      <div id="annotations-panel">
+        <div id="annotations-header">
+          <span>Annotations</span>
+          <button class="ghost" onclick="toggleAnnotationsPanel()">✕</button>
+        </div>
+        <div id="annotations-list"></div>
+      </div>
+    </div>
+  </div>
+</div><!-- /app -->
+
+<!-- ============================================================
+     SELECTION TOOLTIP (for highlight/annotate)
+     ============================================================ -->
+<div id="selection-tooltip">
+  <span id="tooltip-label" style="opacity:.7;margin-right:4px">Highlight</span>
+  <button onclick="highlightSelection()" title="Highlight">🖊</button>
+  <button onclick="annotateSelection()" title="Add note">📝</button>
+  <button onclick="dismissTooltip()" title="Dismiss">✕</button>
+</div>
+
+<!-- ANNOTATION POPUP FORM -->
+<div id="annotation-popup">
+  <div style="font-size:.8em;font-weight:600;color:var(--text-muted)">Add note to highlighted text</div>
+  <div id="annotation-quote-preview" style="font-size:.8em;font-style:italic;color:var(--text-muted);border-left:3px solid #fef08a;padding-left:6px;background:rgba(254,240,138,.15);border-radius:2px;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden"></div>
+  <textarea id="annotation-textarea" placeholder="Write your private note… (only you can see this)"></textarea>
+  <div style="font-size:.73em;color:var(--text-muted)">💡 Save = stored privately in your Blossom blob &nbsp;|&nbsp; Publish = posted as a public Nostr note</div>
+  <div id="annotation-popup-actions">
+    <button onclick="cancelAnnotation()">Cancel</button>
+    <button onclick="saveAnnotation(false)" style="border-color:var(--border)">💾 Save privately</button>
+    <button class="primary" onclick="saveAnnotation(true)">🌐 Publish to Nostr</button>
+  </div>
+</div>
+
+<!-- CONTEXT MENU (right-click on feed) -->
+<div id="context-menu">
+  <div class="ctx-item" id="ctx-refresh" onclick="ctxRefreshFeed()">
+    <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="1 4 1 10 7 10"/><path d="M3.51 15a9 9 0 102.13-9.36L1 10"/></svg>
+    Refresh feed
+  </div>
+  <div class="ctx-item" id="ctx-mark-all-read" onclick="ctxMarkAllRead()">
+    <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="20 6 9 17 4 12"/></svg>
+    Mark all read
+  </div>
+  <div class="ctx-sep"></div>
+  <div class="ctx-item" id="ctx-edit-feed" onclick="ctxEditFeed()">
+    <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M11 4H4a2 2 0 00-2 2v14a2 2 0 002 2h14a2 2 0 002-2v-7"/><path d="M18.5 2.5a2.121 2.121 0 013 3L12 15l-4 1 1-4 9.5-9.5z"/></svg>
+    Edit feed
+  </div>
+  <div class="ctx-item danger" id="ctx-delete-feed" onclick="ctxDeleteFeed()">
+    <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="3 6 5 6 21 6"/><path d="M19 6l-1 14H6L5 6"/><path d="M10 11v6M14 11v6"/><path d="M9 6V4h6v2"/></svg>
+    Delete feed
+  </div>
+</div>
+
+<!-- ARTICLE CONTEXT MENU -->
+<div id="article-ctx-menu" style="position:fixed;background:var(--bg-panel);border:1px solid var(--border);border-radius:var(--radius);box-shadow:var(--shadow);z-index:3000;display:none;min-width:160px;padding:4px 0">
+  <div class="ctx-item" onclick="ctxTagArticle()">
+    <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M20.59 13.41l-7.17 7.17a2 2 0 01-2.83 0L2 12V2h10l8.59 8.59a2 2 0 010 2.82z"/><line x1="7" y1="7" x2="7.01" y2="7"/></svg>
+    Assign tags…
+  </div>
+  <div class="ctx-item" onclick="ctxSummarizeArticle()">
+    <span>✨</span> Summarize with AI
+  </div>
+</div>
+
+<!-- ============================================================
+     MODALS
+     ============================================================ -->
+
+<!-- ADD FEED MODAL -->
+<div class="modal-overlay" id="modal-add-feed">
+  <div class="modal">
+    <h2>Add Feed</h2>
+    <div class="form-group">
+      <label for="new-feed-url">Feed URL (RSS or Atom)</label>
+      <input type="url" id="new-feed-url" placeholder="https://example.com/feed.xml" autocomplete="off">
+    </div>
+    <div class="form-group">
+      <label for="new-feed-title">Custom title (optional)</label>
+      <input type="text" id="new-feed-title" placeholder="Leave blank to auto-detect">
+    </div>
+    <div id="add-feed-status" style="font-size:.82em;color:var(--text-muted);min-height:1.2em"></div>
+    <div class="modal-actions">
+      <button onclick="closeModal('modal-add-feed')">Cancel</button>
+      <button class="primary" onclick="addFeed()">Add Feed</button>
+    </div>
+  </div>
+</div>
+
+<!-- EDIT FEED MODAL -->
+<div class="modal-overlay" id="modal-edit-feed">
+  <div class="modal">
+    <h2>Edit Feed</h2>
+    <input type="hidden" id="edit-feed-id">
+    <div class="form-group">
+      <label for="edit-feed-url">Feed URL</label>
+      <input type="url" id="edit-feed-url">
+    </div>
+    <div class="form-group">
+      <label for="edit-feed-title">Title</label>
+      <input type="text" id="edit-feed-title">
+    </div>
+    <div class="modal-actions">
+      <button onclick="closeModal('modal-edit-feed')">Cancel</button>
+      <button class="primary" onclick="saveEditFeed()">Save</button>
+    </div>
+  </div>
+</div>
+
+<!-- SETTINGS MODAL -->
+<div class="modal-overlay" id="settings-modal">
+  <div class="modal" id="settings-modal">
+    <h2>Settings</h2>
+
+    <div class="setting-row">
+      <div>
+        <div class="setting-label">Theme</div>
+      </div>
+      <div class="toggle-group">
+        <button class="toggle-btn" id="theme-light-btn" onclick="setTheme('light')">Light</button>
+        <button class="toggle-btn" id="theme-dark-btn"  onclick="setTheme('dark')">Dark</button>
+      </div>
+    </div>
+
+    <div class="setting-row">
+      <div>
+        <div class="setting-label">Font</div>
+      </div>
+      <div class="toggle-group">
+        <button class="toggle-btn" data-family="serif" onclick="setFontFamily('serif')" style="font-family:Georgia,serif">Serif</button>
+        <button class="toggle-btn" data-family="sans"  onclick="setFontFamily('sans')"  style="font-family:system-ui">Sans</button>
+        <button class="toggle-btn" data-family="mono"  onclick="setFontFamily('mono')"  style="font-family:monospace">Mono</button>
+      </div>
+    </div>
+
+    <div class="setting-row">
+      <div>
+        <div class="setting-label">Font size</div>
+      </div>
+      <div class="toggle-group">
+        <button class="toggle-btn" data-size="small"  onclick="setFontSize('small')"  style="font-size:.75em">S</button>
+        <button class="toggle-btn" data-size="medium" onclick="setFontSize('medium')" style="font-size:.88em">M</button>
+        <button class="toggle-btn" data-size="large"  onclick="setFontSize('large')"  style="font-size:1em">L</button>
+        <button class="toggle-btn" data-size="xlarge" onclick="setFontSize('xlarge')" style="font-size:1.1em">XL</button>
+      </div>
+    </div>
+
+    <div class="setting-row" style="flex-direction:column;align-items:flex-start;gap:8px">
+      <div>
+        <div class="setting-label">Blossom servers</div>
+        <div class="setting-desc">Your data blob is uploaded to all selected servers. A <strong>$</strong> icon means the server requires payment.</div>
+      </div>
+      <div id="blossom-server-list" style="width:100%;display:flex;flex-direction:column;gap:6px"></div>
+      <div style="display:flex;gap:6px;width:100%">
+        <input type="url" id="blossom-server-add-input" placeholder="https://your-server.com" style="flex:1;font-size:.82em">
+        <button onclick="addBlossomServer()" style="white-space:nowrap;font-size:.82em">+ Add server</button>
+      </div>
+    </div>
+
+    <div class="setting-row">
+      <div>
+        <div class="setting-label">CORS proxy</div>
+        <div class="setting-desc">Used to fetch RSS feeds (required for browser)</div>
+      </div>
+      <input type="url" id="cors-proxy-input" value="https://api.allorigins.win/raw?url=" style="width:180px">
+    </div>
+
+    <div class="setting-row">
+      <div>
+        <div class="setting-label">Auto-refresh interval</div>
+        <div class="setting-desc">Minutes between feed refreshes (0 = manual only)</div>
+      </div>
+      <input type="number" id="refresh-interval-input" value="30" min="0" max="1440" style="width:80px">
+    </div>
+
+    <div class="setting-row">
+      <div>
+        <div class="setting-label">Export OPML</div>
+        <div class="setting-desc">Download your feed list as OPML file</div>
+      </div>
+      <button onclick="exportOPML()">Export</button>
+    </div>
+
+    <div class="setting-row">
+      <div>
+        <div class="setting-label">Account</div>
+        <div class="setting-desc" id="settings-npub-display" style="word-break:break-all"></div>
+      </div>
+      <button class="danger" onclick="logout()">Log out</button>
+    </div>
+
+    <div class="modal-actions">
+      <button class="primary" onclick="saveSettings()">Save &amp; Close</button>
+    </div>
+  </div>
+</div>
+
+<!-- LLM SETTINGS MODAL -->
+<div class="modal-overlay" id="modal-llm-settings">
+  <div class="modal">
+    <h2>AI Summaries — Local LLM</h2>
+    <p style="font-size:.85em;color:var(--text-muted);margin-bottom:12px">
+      Connect to a locally running <a href="https://ollama.com" target="_blank">Ollama</a> instance or any OpenAI-compatible API (LM Studio, Jan, etc.) to generate private article summaries. Your article text is sent only to your local endpoint — nothing goes to external servers.
+    </p>
+    <details style="margin-bottom:16px;font-size:.8em;background:var(--bg-active);border:1px solid var(--border);border-radius:var(--radius);padding:8px 10px">
+      <summary style="cursor:pointer;font-weight:600;color:var(--text)">⚠ Setup required — read this if the connection fails</summary>
+      <div style="margin-top:8px;line-height:1.55;color:var(--text-muted)">
+        Browsers block a secure <code>https://</code> page (like GitHub Pages) from calling an insecure <code>http://localhost</code> endpoint — this is called <strong>mixed-content blocking</strong>. Two ways around it:
+        <ol style="margin:6px 0 6px 18px;padding:0">
+          <li style="margin:3px 0"><strong>Run WebRSS locally</strong> over <code>http://localhost</code> (e.g. <code>python -m http.server</code>) — then both sides are http and it works directly.</li>
+          <li style="margin:3px 0"><strong>Or</strong> put a small HTTPS reverse-proxy in front of Ollama and use that <code>https://</code> URL here.</li>
+        </ol>
+        <strong>Also:</strong> Ollama must allow this site as an origin. Start it with<br>
+        <code style="display:inline-block;margin:4px 0;background:var(--bg);padding:2px 6px;border-radius:3px">OLLAMA_ORIGINS=* ollama serve</code><br>
+        (or set it to this page's exact origin). Click <em>Test connection</em> below to verify.
+      </div>
+    </details>
+    <div class="form-group">
+      <label for="llm-endpoint">API endpoint (OpenAI-compatible)</label>
+      <input type="url" id="llm-endpoint" placeholder="http://localhost:11434/v1/chat/completions">
+      <span class="form-hint">Ollama default: http://localhost:11434/v1/chat/completions</span>
+    </div>
+    <div class="form-group">
+      <label for="llm-model">Model name</label>
+      <input type="text" id="llm-model" placeholder="llama3.2, mistral, phi3…">
+    </div>
+    <div class="form-group">
+      <label for="llm-apikey">API key (leave blank for Ollama)</label>
+      <input type="password" id="llm-apikey" placeholder="sk-… or leave blank">
+    </div>
+    <div class="form-group">
+      <label for="llm-system-prompt">Summary prompt</label>
+      <textarea id="llm-system-prompt" style="min-height:80px">Summarize this article in 2-3 concise sentences. Focus on the key facts and main takeaway.</textarea>
+    </div>
+    <div id="llm-test-result" style="font-size:.82em;color:var(--text-muted);min-height:1.2em"></div>
+    <div class="modal-actions">
+      <button onclick="testLLMConnection()">Test connection</button>
+      <button onclick="closeModal('modal-llm-settings')">Cancel</button>
+      <button class="primary" onclick="saveLLMSettings()">Save</button>
+    </div>
+  </div>
+</div>
+
+<!-- TAG ASSIGN MODAL -->
+<div class="modal-overlay" id="modal-tag-assign">
+  <div class="modal" style="max-width:320px">
+    <h2>Assign tags</h2>
+    <div class="tag-checkbox-list" id="tag-assign-list"></div>
+    <div class="modal-actions">
+      <button onclick="closeModal('modal-tag-assign')">Cancel</button>
+      <button class="primary" onclick="saveTagAssignment()">Save</button>
+    </div>
+  </div>
+</div>
+
+<!-- DIGEST MODAL -->
+<div class="modal-overlay" id="modal-digest">
+  <div class="modal" style="max-width:560px">
+    <h2 id="digest-modal-title">Today</h2>
+    <p style="font-size:.82em;color:var(--text-muted);margin-bottom:12px" id="digest-modal-desc"></p>
+    <ul class="digest-list" id="digest-list"></ul>
+    <div class="modal-actions">
+      <button onclick="closeModal('modal-digest')">Close</button>
+    </div>
+  </div>
+</div>
+
+<!-- TOAST CONTAINER -->
+<div id="toast-container"></div>
+
+<!-- HIDDEN INPUTS -->
+<input type="file" id="opml-file-input" accept=".opml,.xml" style="display:none" onchange="handleOPMLFile(event)">
+
+<!-- ============================================================
+     JAVASCRIPT
+     ============================================================ -->
+<script>
+'use strict';
+
+/* ============================================================
+   BECH32 — minimal implementation for nsec/npub
+   ============================================================ */
+const BECH32 = (() => {
+  const CHARSET = 'qpzry9x8gf2tvdw0s3jn54khce6mua7l';
+  const GEN = [0x3b6a57b2, 0x26508e6d, 0x1ea119fa, 0x3d4233dd, 0x2a1462b3];
+
+  function polymod(values) {
+    let chk = 1;
+    for (const v of values) {
+      const top = chk >> 25;
+      chk = (chk & 0x1ffffff) << 5 ^ v;
+      for (let i = 0; i < 5; i++) if ((top >> i) & 1) chk ^= GEN[i];
+    }
+    return chk;
+  }
+  function hrpExpand(hrp) {
+    const r = [];
+    for (const c of hrp) r.push(c.charCodeAt(0) >> 5);
+    r.push(0);
+    for (const c of hrp) r.push(c.charCodeAt(0) & 31);
+    return r;
+  }
+  function createChecksum(hrp, data) {
+    const values = hrpExpand(hrp).concat(data).concat([0,0,0,0,0,0]);
+    const mod = polymod(values) ^ 1;
+    return Array.from({length:6}, (_,i) => (mod >> (5*(5-i))) & 31);
+  }
+  function convertBits(data, fromBits, toBits, pad = true) {
+    let acc = 0, bits = 0;
+    const result = [];
+    const maxv = (1 << toBits) - 1;
+    for (const val of data) {
+      acc = (acc << fromBits) | val;
+      bits += fromBits;
+      while (bits >= toBits) {
+        bits -= toBits;
+        result.push((acc >> bits) & maxv);
+      }
+    }
+    if (pad && bits > 0) result.push((acc << (toBits - bits)) & maxv);
+    else if (!pad && (bits >= fromBits || ((acc << (toBits - bits)) & maxv))) return null;
+    return result;
+  }
+  function encode(hrp, data) {
+    const conv = convertBits(data, 8, 5);
+    const checksum = createChecksum(hrp, conv);
+    return hrp + '1' + conv.concat(checksum).map(d => CHARSET[d]).join('');
+  }
+  function decode(bechStr) {
+    const str = bechStr.toLowerCase();
+    const sep = str.lastIndexOf('1');
+    if (sep < 1) throw new Error('Invalid bech32');
+    const hrp = str.slice(0, sep);
+    const data = [];
+    for (let i = sep + 1; i < str.length; i++) {
+      const d = CHARSET.indexOf(str[i]);
+      if (d < 0) throw new Error('Invalid char: ' + str[i]);
+      data.push(d);
+    }
+    if (polymod(hrpExpand(hrp).concat(data)) !== 1) throw new Error('Invalid checksum');
+    const decoded = convertBits(data.slice(0, -6), 5, 8, false);
+    return { hrp, data: decoded };
+  }
+  return { encode, decode };
+})();
+
+/* ============================================================
+   HEX / BYTES UTILITIES
+   ============================================================ */
+const hexToBytes = hex => new Uint8Array(hex.match(/.{1,2}/g).map(b => parseInt(b, 16)));
+const bytesToHex = bytes => Array.from(bytes).map(b => b.toString(16).padStart(2,'0')).join('');
+const utf8Encode = s => new TextEncoder().encode(s);
+const utf8Decode = b => new TextDecoder().decode(b);
+
+async function sha256(data) {
+  const buf = typeof data === 'string' ? utf8Encode(data) : data;
+  const hash = await crypto.subtle.digest('SHA-256', buf);
+  return bytesToHex(new Uint8Array(hash));
+}
+async function sha256Bytes(data) {
+  const buf = typeof data === 'string' ? utf8Encode(data) : data;
+  const hash = await crypto.subtle.digest('SHA-256', buf);
+  return new Uint8Array(hash);
+}
+
+/* ============================================================
+   NOSTR KEY MANAGEMENT
+   ============================================================ */
+let _privKeyHex = null;
+let _pubKeyHex  = null;
+
+// nobleSecp is loaded from CDN as an ES module that assigns window.nobleSecp256k1.
+function getSecp() {
+  return window.nobleSecp256k1 || window.secp256k1;
+}
+
+// Resolves once the crypto module has loaded. The module dispatches a
+// 'secp-ready' event; we also poll as a fallback. Rejects after ~8s offline.
+function whenSecpReady(timeoutMs = 8000) {
+  return new Promise((resolve, reject) => {
+    if (getSecp()) return resolve();
+    let done = false;
+    const finish = ok => {
+      if (done) return; done = true;
+      window.removeEventListener('secp-ready', onReady);
+      ok ? resolve() : reject(new Error('Crypto library failed to load. Check your connection and reload.'));
+    };
+    const onReady = () => finish(true);
+    window.addEventListener('secp-ready', onReady);
+    const started = Date.now();
+    (function poll() {
+      if (getSecp()) return finish(true);
+      if (Date.now() - started > timeoutMs) return finish(false);
+      setTimeout(poll, 100);
+    })();
+  });
+}
+
+function privKeyToNsec(hex) {
+  return BECH32.encode('nsec', hexToBytes(hex));
+}
+function pubKeyToNpub(hex) {
+  return BECH32.encode('npub', hexToBytes(hex));
+}
+function nsecToPrivKey(nsec) {
+  const { hrp, data } = BECH32.decode(nsec.trim().toLowerCase());
+  if (hrp !== 'nsec') throw new Error('Not an nsec key');
+  return bytesToHex(new Uint8Array(data));
+}
+function pubKeyFromPriv(privHex) {
+  const secp = getSecp();
+  const pubBytes = secp.getPublicKey(privHex, true); // compressed
+  // Nostr uses x-only (first 32 bytes of uncompressed without prefix)
+  const pubUncompressed = secp.getPublicKey(privHex, false);
+  return bytesToHex(pubUncompressed.slice(1, 33));
+}
+
+async function computeEventId(event) {
+  const ser = JSON.stringify([0, event.pubkey, event.created_at, event.kind, event.tags, event.content]);
+  return sha256(ser);
+}
+
+async function signEvent(event, privHex) {
+  const secp = getSecp();
+  event.id  = await computeEventId(event);
+  const sig = secp.schnorr
+    ? await secp.schnorr.sign(event.id, privHex)
+    : secp.sign(event.id, privHex);
+  if (sig instanceof Uint8Array) {
+    event.sig = bytesToHex(sig);
+  } else {
+    event.sig = typeof sig === 'string' ? sig : sig.toCompactHex ? sig.toCompactHex() : bytesToHex(sig);
+  }
+  return event;
+}
+
+/* ============================================================
+   INDEXEDDB STORAGE
+   ============================================================ */
+let DB = null;
+const DB_NAME = 'webrss';
+const DB_VERSION = 1;
+
+function openDB() {
+  return new Promise((resolve, reject) => {
+    const req = indexedDB.open(DB_NAME, DB_VERSION);
+    req.onerror = () => reject(req.error);
+    req.onsuccess = () => { DB = req.result; resolve(DB); };
+    req.onupgradeneeded = evt => {
+      const db = evt.target.result;
+      if (!db.objectStoreNames.contains('feeds')) {
+        const fs = db.createObjectStore('feeds', { keyPath: 'id' });
+        fs.createIndex('url', 'url', { unique: true });
+      }
+      if (!db.objectStoreNames.contains('articles')) {
+        const as = db.createObjectStore('articles', { keyPath: 'id' });
+        as.createIndex('feedId', 'feedId');
+        as.createIndex('pubDate', 'pubDate');
+        as.createIndex('read', 'read');
+      }
+      if (!db.objectStoreNames.contains('annotations')) {
+        db.createObjectStore('annotations', { keyPath: 'id' });
+      }
+      if (!db.objectStoreNames.contains('highlights')) {
+        db.createObjectStore('highlights', { keyPath: 'id' });
+      }
+      if (!db.objectStoreNames.contains('settings')) {
+        db.createObjectStore('settings', { keyPath: 'key' });
+      }
+    };
+  });
+}
+
+function dbTx(storeName, mode = 'readonly') {
+  return DB.transaction(storeName, mode).objectStore(storeName);
+}
+
+function dbGet(store, key) {
+  return new Promise((res, rej) => {
+    const r = dbTx(store).get(key);
+    r.onsuccess = () => res(r.result);
+    r.onerror = () => rej(r.error);
+  });
+}
+function dbPut(store, value) {
+  return new Promise((res, rej) => {
+    const r = dbTx(store, 'readwrite').put(value);
+    r.onsuccess = () => res(r.result);
+    r.onerror = () => rej(r.error);
+  });
+}
+function dbDelete(store, key) {
+  return new Promise((res, rej) => {
+    const r = dbTx(store, 'readwrite').delete(key);
+    r.onsuccess = () => res();
+    r.onerror = () => rej(r.error);
+  });
+}
+function dbGetAll(store, index, query) {
+  return new Promise((res, rej) => {
+    const tx = DB.transaction(store, 'readonly');
+    const s = tx.objectStore(store);
+    const src = index ? s.index(index) : s;
+    const r = query ? src.getAll(query) : src.getAll();
+    r.onsuccess = () => res(r.result);
+    r.onerror = () => rej(r.error);
+  });
+}
+async function getSetting(key, def) {
+  const r = await dbGet('settings', key);
+  return r ? r.value : def;
+}
+async function setSetting(key, value) {
+  await dbPut('settings', { key, value });
+}
+
+/* ============================================================
+   APP STATE
+   ============================================================ */
+let appState = {
+  feeds: [],
+  articles: [],
+  currentFeedId: 'all',
+  currentArticleId: null,
+  currentTab: 'unread',
+  searchQuery: '',
+  hlColor: 'yellow',
+  blossomServer: 'https://blossom.band',
+  corsProxy: 'https://api.allorigins.win/raw?url=',
+  refreshInterval: 30,
+  pendingAnnotation: null,   // { articleId, range, text }
+  searchIndex: {},           // word → Set of articleIds
+  contextFeedId: null,
+  refreshTimer: null,
+};
+
+/* ============================================================
+   SEARCH INDEX
+   ============================================================ */
+function indexArticle(article) {
+  const words = tokenize((article.title || '') + ' ' + stripHtml(article.content || ''));
+  for (const w of words) {
+    if (!appState.searchIndex[w]) appState.searchIndex[w] = new Set();
+    appState.searchIndex[w].add(article.id);
+  }
+}
+function deindexArticle(articleId) {
+  for (const w of Object.keys(appState.searchIndex)) {
+    appState.searchIndex[w].delete(articleId);
+  }
+}
+function tokenize(text) {
+  return text.toLowerCase().replace(/[^\w\s]/g, ' ').split(/\s+/).filter(w => w.length > 1);
+}
+function searchArticles(query) {
+  const words = tokenize(query);
+  if (!words.length) return null; // null means no search active
+  const sets = words.map(w => {
+    const matching = new Set();
+    for (const [key, ids] of Object.entries(appState.searchIndex)) {
+      if (key.includes(w)) ids.forEach(id => matching.add(id));
+    }
+    return matching;
+  });
+  // Intersect all word sets
+  let result = sets[0];
+  for (let i = 1; i < sets.length; i++) {
+    result = new Set([...result].filter(id => sets[i].has(id)));
+  }
+  return result;
+}
+function stripHtml(html) {
+  const tmp = document.createElement('div');
+  tmp.innerHTML = html;
+  return tmp.textContent || '';
+}
+function buildSearchIndex(articles) {
+  appState.searchIndex = {};
+  for (const a of articles) indexArticle(a);
+}
+
+/* ============================================================
+   RSS / ATOM PARSER
+   ============================================================ */
+function parseRSS(xmlDoc, feedUrl) {
+  const articles = [];
+  const isAtom = !!xmlDoc.querySelector('feed');
+
+  if (isAtom) {
+    // Atom
+    const feedTitle = xmlDoc.querySelector('feed > title')?.textContent?.trim() || feedUrl;
+    const entries = xmlDoc.querySelectorAll('entry');
+    for (const entry of entries) {
+      const id = entry.querySelector('id')?.textContent?.trim()
+                 || entry.querySelector('link')?.getAttribute('href')
+                 || Math.random().toString(36);
+      const title = entry.querySelector('title')?.textContent?.trim() || 'Untitled';
+      const link  = entry.querySelector('link[rel="alternate"]')?.getAttribute('href')
+                 || entry.querySelector('link')?.getAttribute('href') || '';
+      const content = entry.querySelector('content')?.innerHTML
+                   || entry.querySelector('summary')?.innerHTML || '';
+      const pubDate = entry.querySelector('published')?.textContent
+                   || entry.querySelector('updated')?.textContent || '';
+      const author = entry.querySelector('author name')?.textContent?.trim() || '';
+      articles.push({ id: feedUrl + '::' + id, title, link, content, pubDate, author });
+    }
+    return { feedTitle, articles };
+  } else {
+    // RSS 2.0
+    const feedTitle = xmlDoc.querySelector('channel > title')?.textContent?.trim() || feedUrl;
+    const items = xmlDoc.querySelectorAll('item');
+    for (const item of items) {
+      const guid = item.querySelector('guid')?.textContent?.trim() || '';
+      const id   = feedUrl + '::' + (guid || item.querySelector('link')?.textContent?.trim() || Math.random().toString(36));
+      const title = item.querySelector('title')?.textContent?.trim() || 'Untitled';
+      const link  = item.querySelector('link')?.textContent?.trim() || '';
+      const content = item.querySelector('content\\:encoded')?.innerHTML
+                   || item.querySelector('description')?.innerHTML || '';
+      const pubDate = item.querySelector('pubDate')?.textContent?.trim()
+                   || item.querySelector('dc\\:date')?.textContent?.trim() || '';
+      const author = item.querySelector('author')?.textContent?.trim()
+                  || item.querySelector('dc\\:creator')?.textContent?.trim() || '';
+      articles.push({ id, title, link, content, pubDate, author });
+    }
+    return { feedTitle, articles };
+  }
+}
+
+async function fetchFeed(feed) {
+  const proxy = appState.corsProxy;
+  const url = proxy + encodeURIComponent(feed.url);
+  const resp = await fetch(url, { cache: 'no-store' });
+  if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+  const text = await resp.text();
+  const parser = new DOMParser();
+  const doc = parser.parseFromString(text, 'application/xml');
+  if (doc.querySelector('parsererror')) throw new Error('XML parse error');
+  return parseRSS(doc, feed.url);
+}
+
+async function refreshFeed(feed) {
+  try {
+    const { feedTitle, articles } = await fetchFeed(feed);
+    // Update feed title if not custom
+    if (!feed.customTitle) feed.title = feedTitle;
+    feed.lastRefreshed = Date.now();
+    await dbPut('feeds', feed);
+
+    let newCount = 0;
+    for (const raw of articles) {
+      const existing = await dbGet('articles', raw.id);
+      if (!existing) {
+        const article = {
+          ...raw,
+          feedId: feed.id,
+          feedTitle: feed.title,
+          read: false,
+          starred: false,
+          archived: false,
+          savedAt: Date.now(),
+        };
+        await dbPut('articles', article);
+        newCount++;
+      }
+    }
+    return newCount;
+  } catch (err) {
+    console.warn('Feed refresh failed:', feed.url, err);
+    return 0;
+  }
+}
+
+async function refreshAllFeeds() {
+  setProgress(10);
+  const feeds = await dbGetAll('feeds');
+  let total = 0;
+  for (let i = 0; i < feeds.length; i++) {
+    total += await refreshFeed(feeds[i]);
+    setProgress(10 + Math.round(80 * (i + 1) / feeds.length));
+  }
+  appState.articles = await dbGetAll('articles');
+  buildSearchIndex(appState.articles);
+  renderFeedList();
+  renderArticleList();
+  setProgress(100);
+  setTimeout(() => setProgress(0), 600);
+  return total;
+}
+
+/* ============================================================
+   OPML IMPORT / EXPORT
+   ============================================================ */
+function importOPML() {
+  document.getElementById('opml-file-input').click();
+}
+async function handleOPMLFile(evt) {
+  const file = evt.target.files[0];
+  if (!file) return;
+  const text = await file.text();
+  const parser = new DOMParser();
+  const doc = parser.parseFromString(text, 'text/xml');
+  const outlines = doc.querySelectorAll('outline[type="rss"], outline[xmlUrl]');
+  let added = 0;
+  for (const o of outlines) {
+    const url = o.getAttribute('xmlUrl') || o.getAttribute('xmlurl');
+    const title = o.getAttribute('title') || o.getAttribute('text') || url;
+    if (url) {
+      const id = 'feed::' + await sha256(url);
+      const existing = await dbGet('feeds', id);
+      if (!existing) {
+        await dbPut('feeds', { id, url, title, customTitle: !!o.getAttribute('title'), lastRefreshed: 0 });
+        added++;
+      }
+    }
+  }
+  toast(`Imported ${added} new feed(s) from OPML`, 'success');
+  appState.feeds = await dbGetAll('feeds');
+  await refreshAllFeeds();
+  evt.target.value = '';
+}
+
+async function exportOPML() {
+  const feeds = await dbGetAll('feeds');
+  const xml = `<?xml version="1.0" encoding="UTF-8"?>
+<opml version="2.0">
+  <head><title>WebRSS Feeds</title></head>
+  <body>
+    <outline text="Feeds" title="Feeds">
+${feeds.map(f => `      <outline type="rss" text="${escXml(f.title)}" title="${escXml(f.title)}" xmlUrl="${escXml(f.url)}"/>`).join('\n')}
+    </outline>
+  </body>
+</opml>`;
+  const blob = new Blob([xml], { type: 'text/xml' });
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(blob);
+  a.download = 'webrss-feeds.opml';
+  a.click();
+  URL.revokeObjectURL(a.href);
+}
+
+function escXml(str) {
+  return (str || '').replace(/&/g,'&amp;').replace(/"/g,'&quot;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+}
+
+/* ============================================================
+   BLOSSOM SERVER LIST — paid/free, multiple servers
+   ============================================================ */
+
+// Well-known servers with payment info
+const KNOWN_BLOSSOM_SERVERS = {
+  'https://blossom.band':       { paid: false },
+  'https://cdn.hzrd149.com':    { paid: false },
+  'https://nostr.build':        { paid: false },
+  'https://files.v0l.io':       { paid: false },
+  'https://blossom.primal.net': { paid: false },
+  'https://satellite.earth':    { paid: true,  payUrl: 'https://satellite.earth/pricing' },
+  'https://nostrmedia.com':     { paid: true,  payUrl: 'https://nostrmedia.com' },
+};
+
+async function getBlossomServers() {
+  const saved = await getSetting('blossomServers', null);
+  if (saved && Array.isArray(saved) && saved.length) return saved;
+  return [{ url: 'https://blossom.band', paid: false }];
+}
+
+async function saveBlossomServers(servers) {
+  await setSetting('blossomServers', servers);
+}
+
+async function renderBlossomServerList() {
+  const servers = await getBlossomServers();
+  const container = document.getElementById('blossom-server-list');
+  if (!container) return;
+  container.innerHTML = '';
+  for (const s of servers) {
+    const info = KNOWN_BLOSSOM_SERVERS[s.url.replace(/\/$/, '')] || {};
+    const paid = info.paid || s.paid;
+    const payUrl = info.payUrl || s.payUrl || '';
+    const row = document.createElement('div');
+    row.style.cssText = 'display:flex;align-items:center;gap:6px;background:var(--bg);border:1px solid var(--border);border-radius:var(--radius);padding:4px 8px;font-size:.82em';
+    row.innerHTML = `
+      <span style="flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${escHtml(s.url)}</span>
+      ${paid ? `<a href="${escHtml(payUrl)}" target="_blank" rel="noopener" title="Payment required — click for details" style="color:#ca8a04;font-weight:700;text-decoration:none;flex-shrink:0">$</a>` : '<span style="color:var(--green-dark);font-size:.85em;flex-shrink:0">free</span>'}
+      <button class="ghost" style="padding:2px 4px;flex-shrink:0;font-size:.85em" title="Remove" onclick="removeBlossomServer('${escHtml(s.url)}')">✕</button>`;
+    container.appendChild(row);
+  }
+}
+
+async function addBlossomServer() {
+  const input = document.getElementById('blossom-server-add-input');
+  const url = input.value.trim().replace(/\/$/, '');
+  if (!url || !url.startsWith('http')) { toast('Enter a valid URL', 'error'); return; }
+  const servers = await getBlossomServers();
+  if (servers.find(s => s.url === url)) { toast('Server already in list', 'info'); return; }
+  const info = KNOWN_BLOSSOM_SERVERS[url] || {};
+  servers.push({ url, paid: !!info.paid, payUrl: info.payUrl || '' });
+  await saveBlossomServers(servers);
+  input.value = '';
+  renderBlossomServerList();
+  toast('Server added', 'success');
+}
+
+async function removeBlossomServer(url) {
+  const servers = await getBlossomServers();
+  const filtered = servers.filter(s => s.url !== url);
+  if (!filtered.length) { toast('You must keep at least one Blossom server', 'error'); return; }
+  await saveBlossomServers(filtered);
+  renderBlossomServerList();
+}
+
+/* ============================================================
+   BLOSSOM SYNC
+   ============================================================ */
+async function buildSyncBlob() {
+  const articles = await dbGetAll('articles');
+  const annotations = await dbGetAll('annotations');
+  const highlights = await dbGetAll('highlights');
+  const feeds = await dbGetAll('feeds');
+  const tags  = await getTags();
+  const readState  = {};
+  const starState  = {};
+  const tagState   = {};
+  const summaries  = {};
+  for (const a of articles) {
+    if (a.read)    readState[a.id]  = true;
+    if (a.starred) starState[a.id]  = true;
+    if (a.tags?.length) tagState[a.id] = a.tags;
+    if (a.summary) summaries[a.id] = a.summary;
+  }
+  return { v: 1, readState, starState, tagState, summaries, annotations, highlights, feeds, tags, exportedAt: Date.now() };
+}
+
+async function makeNIP98Auth(url, method, bodyBytes) {
+  const payloadHash = bodyBytes ? await sha256(bodyBytes) : undefined;
+  const event = {
+    kind: 27235,
+    pubkey: _pubKeyHex,
+    created_at: Math.floor(Date.now() / 1000),
+    content: '',
+    tags: [['u', url], ['method', method]],
+  };
+  if (payloadHash) event.tags.push(['payload', payloadHash]);
+  await signEvent(event, _privKeyHex);
+  return 'Nostr ' + btoa(JSON.stringify(event));
+}
+
+async function uploadToOneServer(serverUrl, bodyBytes, hash) {
+  const url = serverUrl.replace(/\/$/, '') + '/upload';
+  const auth = await makeNIP98Auth(url, 'PUT', bodyBytes);
+  const resp = await fetch(url, {
+    method: 'PUT',
+    headers: {
+      'Content-Type': 'application/json',
+      'X-SHA-256': hash,
+      'Authorization': auth,
+    },
+    body: bodyBytes,
+  });
+  if (!resp.ok) {
+    const txt = await resp.text().catch(() => '');
+    throw new Error(`${resp.status} ${txt.slice(0,80)}`);
+  }
+  return resp.json();
+}
+
+async function uploadToBlossom(blob) {
+  const json = JSON.stringify(blob);
+  const bodyBytes = utf8Encode(json);
+  const hash = await sha256(bodyBytes);
+  const servers = await getBlossomServers();
+  const errors = [];
+  let lastDescriptor = null;
+  for (const s of servers) {
+    try {
+      const descriptor = await uploadToOneServer(s.url, bodyBytes, hash);
+      lastDescriptor = descriptor;
+    } catch (err) {
+      errors.push(`${s.url}: ${err.message}`);
+    }
+  }
+  if (!lastDescriptor) throw new Error('All Blossom servers failed:\n' + errors.join('\n'));
+  await setSetting('lastBlossomHash', hash);
+  return lastDescriptor;
+}
+
+async function downloadFromBestServer() {
+  const servers = await getBlossomServers();
+  for (const s of servers) {
+    try {
+      const result = await downloadFromSpecificServer(s.url);
+      if (result) return result;
+    } catch {}
+  }
+  return null;
+}
+
+async function downloadFromSpecificServer(serverUrl) {
+  const listUrl = serverUrl.replace(/\/$/, '') + '/list/' + _pubKeyHex + '?limit=50';
+  const auth = await makeNIP98Auth(listUrl, 'GET');
+  const resp = await fetch(listUrl, { headers: { 'Authorization': auth } });
+  if (!resp.ok) throw new Error(`List failed: ${resp.status}`);
+  const blobs = await resp.json();
+  const jsonBlobs = blobs.filter(b => b.type === 'application/json').sort((a,b) => b.uploaded - a.uploaded);
+  if (!jsonBlobs.length) return null;
+  const blobResp = await fetch(jsonBlobs[0].url);
+  if (!blobResp.ok) throw new Error(`Fetch blob failed: ${blobResp.status}`);
+  return blobResp.json();
+}
+
+// Kept for backwards compatibility — now delegates to multi-server version
+async function downloadFromBlossom() {
+  return downloadFromBestServer();
+}
+
+async function applyBlossomData(data) {
+  if (!data || data.v !== 1) return;
+
+  // CONFLICT RESOLUTION:
+  // Read/star state uses OR-merge (once read on any device, stays read).
+  // Annotations and highlights use union-by-id (add any missing, never delete remotely).
+  // Feeds use union-by-id (add any missing feeds from remote).
+  // If both devices go offline and create conflicting data, the next sync wins
+  // for read/star state — meaning an article will stay read once any device marks it read.
+  // Annotations are additive: both sets survive.
+
+  if (data.readState || data.starState) {
+    const articles = await dbGetAll('articles');
+    for (const a of articles) {
+      let changed = false;
+      if (data.readState && data.readState[a.id] && !a.read) { a.read = true; changed = true; }
+      if (data.starState && data.starState[a.id] && !a.starred) { a.starred = true; changed = true; }
+      if (changed) await dbPut('articles', a);
+    }
+  }
+
+  if (data.annotations) {
+    for (const ann of data.annotations) {
+      const existing = await dbGet('annotations', ann.id);
+      if (!existing) await dbPut('annotations', ann); // add only, never overwrite
+    }
+  }
+
+  if (data.highlights) {
+    for (const hl of data.highlights) {
+      const existing = await dbGet('highlights', hl.id);
+      if (!existing) await dbPut('highlights', hl);
+    }
+  }
+
+  if (data.feeds) {
+    for (const f of data.feeds) {
+      const existing = await dbGet('feeds', f.id);
+      if (!existing) await dbPut('feeds', f);
+    }
+  }
+
+  // Restore tag assignments and summaries
+  if (data.tagState || data.summaries) {
+    const articles = await dbGetAll('articles');
+    for (const a of articles) {
+      let changed = false;
+      if (data.tagState && data.tagState[a.id] && !a.tags?.length) {
+        a.tags = data.tagState[a.id];
+        changed = true;
+      }
+      if (data.summaries && data.summaries[a.id] && !a.summary) {
+        a.summary = data.summaries[a.id];
+        changed = true;
+      }
+      if (changed) await dbPut('articles', a);
+    }
+  }
+
+  // Restore user-created tags (union)
+  if (data.tags && Array.isArray(data.tags)) {
+    const existing = await getTags();
+    const existingIds = new Set(existing.map(t => t.id));
+    const merged = [...existing];
+    for (const t of data.tags) if (!existingIds.has(t.id)) merged.push(t);
+    await saveTags(merged);
+  }
+}
+
+async function syncNow(silent = false) {
+  if (!_privKeyHex) {
+    if (!silent) toast('Not logged in', 'error');
+    return;
+  }
+  const btn = document.getElementById('btn-sync');
+  if (btn) { btn.disabled = true; btn.innerHTML = '<span class="spinner"></span>'; }
+  try {
+    const blob = await buildSyncBlob();
+    await uploadToBlossom(blob);
+    await setSetting('lastSyncedAt', Date.now());
+    if (!silent) toast('Synced to Blossom ✓', 'success');
+  } catch (err) {
+    console.error('Sync error:', err);
+    if (!silent) toast('Sync failed: ' + err.message, 'error');
+  } finally {
+    if (btn) { btn.disabled = false; btn.innerHTML = '<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="1 4 1 10 7 10"/><polyline points="23 20 23 14 17 14"/><path d="M20.49 9A9 9 0 005.64 5.64L1 10m22 4l-4.64 4.36A9 9 0 013.51 15"/></svg> Sync'; }
+  }
+}
+
+/* ============================================================
+   LOGIN / LOGOUT
+   ============================================================ */
+let _generatedNsec = null;
+let _generatedPrivHex = null;
+
+function switchLoginTab(tab) {
+  document.getElementById('tab-login').classList.toggle('active', tab === 'login');
+  document.getElementById('tab-generate').classList.toggle('active', tab === 'generate');
+  document.getElementById('login-form').style.display = tab === 'login' ? '' : 'none';
+  document.getElementById('generate-form').style.display = tab === 'generate' ? '' : 'none';
+}
+
+async function doLogin() {
+  const nsecRaw = document.getElementById('nsec-input').value.trim();
+  if (!nsecRaw) { toast('Please enter your NSEC key', 'error'); return; }
+  try {
+    const privHex = nsecToPrivKey(nsecRaw);   // validates format first
+    await whenSecpReady();                     // ensure crypto is ready before signing
+    await startSession(privHex);
+  } catch (err) {
+    toast('Invalid NSEC: ' + err.message, 'error');
+  }
+}
+
+async function doGenerate() {
+  let secp = getSecp();
+  if (!secp) {
+    toast('Loading encryption library…', 'info');
+    try { await whenSecpReady(); secp = getSecp(); }
+    catch (e) { toast(e.message, 'error'); return; }
+  }
+  const privBytes = secp.utils ? secp.utils.randomPrivateKey() : crypto.getRandomValues(new Uint8Array(32));
+  const privHex = bytesToHex(privBytes);
+  const nsec = privKeyToNsec(privHex);
+  _generatedPrivHex = privHex;
+  _generatedNsec = nsec;
+  const box = document.getElementById('generated-nsec-box');
+  box.textContent = nsec;
+  box.classList.add('visible');
+  document.getElementById('generated-copy-row').style.display = 'flex';
+}
+
+function copyNsec() {
+  if (!_generatedNsec) return;
+  navigator.clipboard.writeText(_generatedNsec).then(() => toast('NSEC copied to clipboard', 'success'));
+}
+
+async function doLoginWithGenerated() {
+  if (!_generatedPrivHex) return;
+  await startSession(_generatedPrivHex);
+}
+
+async function startSession(privHex) {
+  _privKeyHex = privHex;
+  try {
+    _pubKeyHex = pubKeyFromPriv(privHex);
+  } catch(e) {
+    toast('Failed to derive public key: ' + e.message, 'error');
+    return;
+  }
+  const npub = pubKeyToNpub(_pubKeyHex);
+  await setSetting('privKey', privHex);
+  document.getElementById('login-screen').classList.add('hidden');
+  document.getElementById('app').style.display = '';
+  document.getElementById('user-npub').textContent = npub.slice(0, 20) + '…';
+  document.getElementById('settings-npub-display').textContent = npub;
+
+  // Load data
+  appState.feeds   = await dbGetAll('feeds');
+  appState.articles = await dbGetAll('articles');
+  buildSearchIndex(appState.articles);
+  renderFeedList();
+  renderArticleList();
+  renderTagsList();
+  applyPreferences();
+  startAutoRefresh();
+
+  // Update LLM status display
+  const llmCfg = await getLLMConfig();
+  updateLLMStatus(llmCfg.endpoint, llmCfg.model);
+
+  // Try to restore from Blossom.
+  // We keep the downloaded blob around so it can be re-applied AFTER feeds are
+  // fetched. On a fresh device the articles store is empty on first apply, so
+  // read-state / tags / summaries (which key off existing article ids) would
+  // otherwise be silently dropped. Feeds and annotations/highlights (own ids)
+  // are applied immediately; the second pass fills in per-article state.
+  let restoredBlob = null;
+  try {
+    restoredBlob = await downloadFromBlossom();
+    if (restoredBlob) {
+      await applyBlossomData(restoredBlob);   // adds feeds, tags, annotations, highlights
+      appState.feeds    = await dbGetAll('feeds');
+      appState.articles = await dbGetAll('articles');
+      buildSearchIndex(appState.articles);
+      renderFeedList();
+      renderArticleList();
+      renderTagsList();
+    }
+  } catch (e) {
+    console.info('No Blossom data or offline:', e.message);
+  }
+
+  // Refresh feeds, then re-apply the blob so per-article state lands on the
+  // articles we just downloaded.
+  if (appState.feeds.length) {
+    refreshAllFeeds().then(async () => {
+      if (restoredBlob) {
+        await applyBlossomData(restoredBlob);  // second pass: read/star/tags/summaries
+        appState.articles = await dbGetAll('articles');
+        buildSearchIndex(appState.articles);
+        renderFeedList();
+        renderArticleList();
+        renderTagsList();
+      }
+    }).catch(err => console.warn('Initial refresh failed:', err));
+  }
+}
+
+async function logout() {
+  if (!confirm('Log out? Your local data remains stored and will be available next time you log in.')) return;
+  await setSetting('privKey', null);
+  _privKeyHex = null;
+  _pubKeyHex = null;
+  clearInterval(appState.refreshTimer);
+  location.reload();
+}
+
+/* ============================================================
+   FEED MANAGEMENT
+   ============================================================ */
+async function addFeed() {
+  const urlInput = document.getElementById('new-feed-url');
+  const titleInput = document.getElementById('new-feed-title');
+  const status = document.getElementById('add-feed-status');
+  const url = urlInput.value.trim();
+  if (!url) { status.textContent = 'Please enter a feed URL'; return; }
+  status.innerHTML = '<span class="spinner"></span> Fetching feed…';
+  try {
+    const id = 'feed::' + await sha256(url);
+    const existing = await dbGet('feeds', id);
+    if (existing) {
+      status.textContent = 'This feed is already in your list.';
+      return;
+    }
+    // Build temp feed to fetch
+    const tmpFeed = { id, url, title: titleInput.value.trim() || url, customTitle: !!titleInput.value.trim(), lastRefreshed: 0 };
+    const { feedTitle } = await fetchFeed(tmpFeed);
+    if (!tmpFeed.customTitle) tmpFeed.title = feedTitle;
+    await dbPut('feeds', tmpFeed);
+    appState.feeds = await dbGetAll('feeds');
+    await refreshFeed(tmpFeed);
+    appState.articles = await dbGetAll('articles');
+    buildSearchIndex(appState.articles);
+    renderFeedList();
+    renderArticleList();
+    closeModal('modal-add-feed');
+    urlInput.value = '';
+    titleInput.value = '';
+    toast(`Added: ${tmpFeed.title}`, 'success');
+  } catch (err) {
+    status.textContent = 'Error: ' + err.message;
+  }
+}
+
+function showAddFeedModal() {
+  document.getElementById('add-feed-status').textContent = '';
+  showModal('modal-add-feed');
+}
+
+async function deleteFeed(feedId) {
+  if (!confirm('Delete this feed and all its articles? This cannot be undone.')) return;
+  await dbDelete('feeds', feedId);
+  // Delete articles for this feed
+  const articles = await dbGetAll('articles', 'feedId', feedId);
+  for (const a of articles) await dbDelete('articles', a.id);
+  appState.feeds = await dbGetAll('feeds');
+  appState.articles = await dbGetAll('articles');
+  buildSearchIndex(appState.articles);
+  renderFeedList();
+  if (appState.currentFeedId === feedId) {
+    selectFeed('all', document.querySelector('[data-feed="all"]'));
+  } else {
+    renderArticleList();
+  }
+  await syncNow(true);
+}
+
+/* ============================================================
+   RENDER FEED LIST
+   ============================================================ */
+async function renderFeedList() {
+  const feeds = await dbGetAll('feeds');
+  const container = document.getElementById('feed-list');
+  container.innerHTML = '';
+
+  // Compute unread count per feed
+  const allArticles = await dbGetAll('articles');
+  const feedUnread = {};
+  let totalUnread = 0;
+  for (const a of allArticles) {
+    if (!a.read) {
+      feedUnread[a.feedId] = (feedUnread[a.feedId] || 0) + 1;
+      totalUnread++;
+    }
+  }
+
+  // Update "All" count
+  const allCount = document.getElementById('all-unread-count');
+  if (totalUnread > 0) {
+    allCount.textContent = totalUnread;
+    allCount.style.display = '';
+  } else {
+    allCount.style.display = 'none';
+  }
+
+  for (const feed of feeds.sort((a,b) => a.title.localeCompare(b.title))) {
+    const div = document.createElement('div');
+    div.className = 'feed-item' + (appState.currentFeedId === feed.id ? ' active' : '');
+    div.dataset.feed = feed.id;
+    div.title = feed.url;
+
+    // Favicon
+    let faviconHtml;
+    try {
+      const domain = new URL(feed.url).hostname;
+      faviconHtml = `<img class="feed-favicon" src="https://www.google.com/s2/favicons?domain=${domain}&sz=32" onerror="this.style.display='none'" loading="lazy">`;
+    } catch {
+      faviconHtml = `<div class="feed-favicon-placeholder"><svg width="8" height="8" viewBox="0 0 24 24" fill="var(--accent)"><circle cx="12" cy="12" r="10"/></svg></div>`;
+    }
+
+    const unread = feedUnread[feed.id] || 0;
+    div.innerHTML = faviconHtml +
+      `<span class="feed-title">${escHtml(feed.title)}</span>` +
+      (unread > 0 ? `<span class="feed-unread-count">${unread}</span>` : '');
+
+    div.addEventListener('click', () => selectFeed(feed.id, div));
+    div.addEventListener('contextmenu', e => { e.preventDefault(); showContextMenu(e, feed.id); });
+    container.appendChild(div);
+  }
+}
+
+/* ============================================================
+   ARTICLE LIST
+   ============================================================ */
+function getFilteredArticles() {
+  let articles = appState.articles;
+
+  // Feed filter
+  if (appState.currentFeedId === 'starred') {
+    articles = articles.filter(a => a.starred);
+  } else if (appState.currentFeedId === 'archive') {
+    articles = articles.filter(a => a.read);
+  } else if (appState.currentFeedId !== 'all') {
+    articles = articles.filter(a => a.feedId === appState.currentFeedId);
+  }
+
+  // Search filter
+  if (appState.searchQuery) {
+    const matchIds = searchArticles(appState.searchQuery);
+    if (matchIds) articles = articles.filter(a => matchIds.has(a.id));
+  }
+
+  // Tab filter (don't apply for archive / starred / search)
+  if (!appState.searchQuery && appState.currentFeedId !== 'archive' && appState.currentFeedId !== 'starred') {
+    if (appState.currentTab === 'unread') articles = articles.filter(a => !a.read);
+    else if (appState.currentTab === 'read') articles = articles.filter(a => a.read);
+  }
+
+  // Sort by date newest first
+  articles = [...articles].sort((a, b) => {
+    const da = new Date(a.pubDate || a.savedAt).getTime() || 0;
+    const db2 = new Date(b.pubDate || b.savedAt).getTime() || 0;
+    return db2 - da;
+  });
+
+  return articles;
+}
+
+function renderArticleList() {
+  const container = document.getElementById('article-list');
+  const articles = getFilteredArticles();
+
+  if (!articles.length) {
+    container.innerHTML = `<div id="list-empty">
+      <svg width="40" height="40" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M4 19.5A2.5 2.5 0 016.5 17H20"/><path d="M6.5 2H20v20H6.5A2.5 2.5 0 014 19.5v-15A2.5 2.5 0 016.5 2z"/></svg>
+      <p>${appState.searchQuery ? 'No results for "' + escHtml(appState.searchQuery) + '"' : 'No articles here yet.'}</p>
+    </div>`;
+    return;
+  }
+
+  const frag = document.createDocumentFragment();
+  for (const article of articles) {
+    const div = document.createElement('div');
+    div.className = 'article-item' + (article.read ? ' read' : '') + (article.id === appState.currentArticleId ? ' active' : '');
+    div.dataset.id = article.id;
+
+    const date = formatDate(article.pubDate);
+    div.innerHTML = `${!article.read ? '<span class="unread-dot"></span>' : ''}
+      <div class="article-item-feed">${escHtml(article.feedTitle || '')}</div>
+      <div class="article-item-title">${escHtml(article.title)}</div>
+      <div class="article-item-meta">
+        <span>${date}</span>
+        ${article.starred ? '<span>★</span>' : ''}
+      </div>`;
+    div.addEventListener('click', () => openArticle(article.id));
+    div.addEventListener('contextmenu', e => { e.preventDefault(); showArticleContextMenu(e, article.id); });
+    frag.appendChild(div);
+  }
+  container.innerHTML = '';
+  container.appendChild(frag);
+}
+
+function selectFeed(feedId, el) {
+  appState.currentFeedId = feedId;
+  document.querySelectorAll('.feed-item').forEach(f => f.classList.remove('active'));
+  if (el) el.classList.add('active');
+  const titles = { all: 'All Articles', starred: 'Starred', archive: 'Archive' };
+  const feed = appState.feeds.find(f => f.id === feedId);
+  document.getElementById('list-title').textContent = titles[feedId] || (feed ? feed.title : 'Feed');
+  renderArticleList();
+}
+
+function switchTab(tab, el) {
+  appState.currentTab = tab;
+  document.querySelectorAll('.list-tab').forEach(t => t.classList.remove('active'));
+  el.classList.add('active');
+  renderArticleList();
+}
+
+function onSearch(val) {
+  appState.searchQuery = val.trim();
+  renderArticleList();
+}
+
+/* ============================================================
+   ARTICLE READING
+   ============================================================ */
+async function openArticle(articleId) {
+  appState.currentArticleId = articleId;
+  const article = appState.articles.find(a => a.id === articleId);
+  if (!article) return;
+
+  // Mark active in list
+  document.querySelectorAll('.article-item').forEach(el => {
+    el.classList.toggle('active', el.dataset.id === articleId);
+  });
+
+  // Mark as read
+  if (!article.read) {
+    article.read = true;
+    await dbPut('articles', article);
+    renderFeedList();
+    renderArticleList();
+    syncNow(true);
+  }
+
+  // Render article
+  document.getElementById('reader-placeholder').style.display = 'none';
+  const view = document.getElementById('article-view');
+  view.style.display = '';
+  document.getElementById('article-title').textContent = article.title;
+  document.getElementById('article-feed-name').textContent = article.feedTitle || '';
+  document.getElementById('article-date').textContent = formatDate(article.pubDate);
+  document.getElementById('article-author').textContent = article.author ? 'by ' + article.author : '';
+  const link = article.link || '#';
+  document.getElementById('btn-open-original').href = link;
+  document.getElementById('btn-toggle-star').style.color = article.starred ? '#ca8a04' : '';
+
+  // Sanitize and render content
+  const body = document.getElementById('article-body');
+  body.innerHTML = sanitizeHtml(article.content || '<p>No content available.</p>');
+
+  // Apply stored highlights
+  await applyHighlights(articleId);
+
+  // Scroll to top
+  document.getElementById('reader-content').scrollTop = 0;
+}
+
+function sanitizeHtml(html) {
+  // Basic sanitization — remove scripts and event handlers
+  const tmp = document.createElement('div');
+  tmp.innerHTML = html;
+  tmp.querySelectorAll('script, style, link, meta, iframe, object, embed, form').forEach(el => el.remove());
+  tmp.querySelectorAll('*').forEach(el => {
+    for (const attr of [...el.attributes]) {
+      if (attr.name.startsWith('on') || attr.name === 'href' && attr.value.startsWith('javascript:')) {
+        el.removeAttribute(attr.name);
+      }
+    }
+  });
+  return tmp.innerHTML;
+}
+
+function formatDate(dateStr) {
+  if (!dateStr) return '';
+  const d = new Date(dateStr);
+  if (isNaN(d)) return dateStr;
+  const now = new Date();
+  const diff = now - d;
+  if (diff < 60000) return 'just now';
+  if (diff < 3600000) return Math.floor(diff/60000) + 'm ago';
+  if (diff < 86400000) return Math.floor(diff/3600000) + 'h ago';
+  if (diff < 604800000) return Math.floor(diff/86400000) + 'd ago';
+  return d.toLocaleDateString('en', { month: 'short', day: 'numeric', year: 'numeric' });
+}
+
+function escHtml(str) {
+  const d = document.createElement('div');
+  d.appendChild(document.createTextNode(str || ''));
+  return d.innerHTML;
+}
+
+async function toggleCurrentRead() {
+  if (!appState.currentArticleId) return;
+  const article = appState.articles.find(a => a.id === appState.currentArticleId);
+  if (!article) return;
+  article.read = !article.read;
+  await dbPut('articles', article);
+  renderFeedList();
+  renderArticleList();
+  syncNow(true);
+}
+
+async function toggleCurrentStar() {
+  if (!appState.currentArticleId) return;
+  const article = appState.articles.find(a => a.id === appState.currentArticleId);
+  if (!article) return;
+  article.starred = !article.starred;
+  await dbPut('articles', article);
+  document.getElementById('btn-toggle-star').style.color = article.starred ? '#ca8a04' : '';
+  renderArticleList();
+  syncNow(true);
+}
+
+/* ============================================================
+   HIGHLIGHTS — always light yellow
+   ============================================================ */
+const HL_COLOR = 'yellow'; // single fixed color
+
+let _pendingRange = null;
+let _pendingText  = null;
+
+document.addEventListener('mouseup', (e) => {
+  const sel = window.getSelection();
+  if (!sel || sel.isCollapsed || !sel.toString().trim()) {
+    dismissTooltip();
+    return;
+  }
+  if (!document.getElementById('article-body').contains(sel.anchorNode)) return;
+  if (e.target.closest('#selection-tooltip') || e.target.closest('#annotation-popup')) return;
+
+  _pendingRange = sel.getRangeAt(0).cloneRange();
+  _pendingText  = sel.toString().trim();
+
+  const rect = _pendingRange.getBoundingClientRect();
+  const tooltip = document.getElementById('selection-tooltip');
+  tooltip.classList.add('visible');
+  tooltip.style.left = Math.min(rect.left, window.innerWidth - 220) + 'px';
+  tooltip.style.top  = (rect.top - 42 + window.scrollY) + 'px';
+});
+
+function dismissTooltip() {
+  const tooltip = document.getElementById('selection-tooltip');
+  tooltip.classList.remove('visible');
+}
+
+async function highlightSelection() {
+  if (!_pendingRange || !_pendingText || !appState.currentArticleId) return;
+  dismissTooltip();
+  const color = HL_COLOR; // always yellow
+  const mark = document.createElement('mark');
+  mark.dataset.color = color;
+  mark.dataset.hlId = 'hl::' + Date.now() + '::' + Math.random().toString(36).slice(2);
+
+  try {
+    _pendingRange.surroundContents(mark);
+  } catch {
+    // Selected across multiple elements — use extractContents
+    mark.appendChild(_pendingRange.extractContents());
+    _pendingRange.insertNode(mark);
+  }
+
+  mark.addEventListener('click', () => removeHighlight(mark.dataset.hlId));
+
+  // Save highlight
+  const hl = {
+    id: mark.dataset.hlId,
+    articleId: appState.currentArticleId,
+    text: _pendingText,
+    color,
+    context: mark.parentElement?.textContent?.slice(0, 200) || '',
+    savedAt: Date.now(),
+  };
+  await dbPut('highlights', hl);
+  window.getSelection()?.removeAllRanges();
+  _pendingRange = null;
+  await syncNow(true);
+}
+
+async function applyHighlights(articleId) {
+  const highlights = (await dbGetAll('highlights')).filter(h => h.articleId === articleId);
+  if (!highlights.length) return;
+  const body = document.getElementById('article-body');
+  for (const hl of highlights) {
+    highlightTextInElement(body, hl.text, hl.color, hl.id);
+  }
+}
+
+function highlightTextInElement(el, searchText, color, hlId) {
+  const walker = document.createTreeWalker(el, NodeFilter.SHOW_TEXT, null);
+  const nodes = [];
+  let node;
+  while ((node = walker.nextNode())) nodes.push(node);
+
+  for (const textNode of nodes) {
+    const idx = textNode.textContent.indexOf(searchText);
+    if (idx === -1) continue;
+    const before = textNode.textContent.slice(0, idx);
+    const after  = textNode.textContent.slice(idx + searchText.length);
+    const mark = document.createElement('mark');
+    mark.dataset.color = color;
+    mark.dataset.hlId = hlId;
+    mark.textContent = searchText;
+    mark.addEventListener('click', () => removeHighlight(hlId));
+    const frag = document.createDocumentFragment();
+    if (before) frag.appendChild(document.createTextNode(before));
+    frag.appendChild(mark);
+    if (after)  frag.appendChild(document.createTextNode(after));
+    textNode.parentNode.replaceChild(frag, textNode);
+    break; // Only first occurrence per load
+  }
+}
+
+async function removeHighlight(hlId) {
+  if (!confirm('Remove this highlight?')) return;
+  await dbDelete('highlights', hlId);
+  // Remove mark from DOM
+  const mark = document.querySelector(`mark[data-hl-id="${hlId}"]`);
+  if (mark) mark.replaceWith(document.createTextNode(mark.textContent));
+  await syncNow(true);
+}
+
+/* ============================================================
+   ANNOTATIONS
+   ============================================================ */
+function annotateSelection() {
+  if (!_pendingText || !appState.currentArticleId) return;
+  dismissTooltip();
+  const popup = document.getElementById('annotation-popup');
+  const preview = document.getElementById('annotation-quote-preview');
+  preview.textContent = _pendingText;
+  popup.classList.add('visible');
+  const sel = window.getSelection();
+  let rect;
+  if (sel && !sel.isCollapsed) {
+    rect = sel.getRangeAt(0).getBoundingClientRect();
+  } else {
+    rect = { right: window.innerWidth / 2, top: window.innerHeight / 2 };
+  }
+  popup.style.left = Math.min(rect.right + 10, window.innerWidth - 380) + 'px';
+  popup.style.top  = Math.max(rect.top - 50, 10) + 'px';
+  document.getElementById('annotation-textarea').focus();
+  appState.pendingAnnotation = { articleId: appState.currentArticleId, text: _pendingText };
+}
+
+function cancelAnnotation() {
+  document.getElementById('annotation-popup').classList.remove('visible');
+  document.getElementById('annotation-textarea').value = '';
+  appState.pendingAnnotation = null;
+}
+
+async function saveAnnotation(publish = false) {
+  const note = document.getElementById('annotation-textarea').value.trim();
+  if (!appState.pendingAnnotation) { cancelAnnotation(); return; }
+
+  const ann = {
+    id: 'ann::' + Date.now() + '::' + Math.random().toString(36).slice(2),
+    articleId: appState.pendingAnnotation.articleId,
+    quote: appState.pendingAnnotation.text,
+    note: note || '',
+    public: publish,
+    savedAt: Date.now(),
+  };
+  await dbPut('annotations', ann);
+  cancelAnnotation();
+
+  // Always highlight the selected text (yellow)
+  if (_pendingRange) await highlightSelection();
+
+  renderAnnotationsPanel(ann.articleId);
+  await syncNow(true);
+
+  if (publish) {
+    await publishAnnotationToNostr(ann);
+  } else {
+    toast('Note saved privately ✓', 'success');
+  }
+}
+
+async function publishAnnotationToNostr(ann) {
+  if (!_privKeyHex || !_pubKeyHex) {
+    toast('Not logged in — cannot publish', 'error');
+    return;
+  }
+  // Find the article to get a link
+  const article = appState.articles.find(a => a.id === ann.articleId);
+  const articleTitle = article ? article.title : '';
+  const articleUrl   = article ? article.link  : '';
+  const noteContent = [
+    ann.note,
+    '',
+    `> "${ann.quote}"`,
+    '',
+    articleTitle ? `— From: ${articleTitle}` : '',
+    articleUrl ? articleUrl : '',
+  ].filter(l => l !== undefined).join('\n').trim();
+
+  const event = {
+    kind: 1,
+    pubkey: _pubKeyHex,
+    created_at: Math.floor(Date.now() / 1000),
+    content: noteContent,
+    tags: articleUrl ? [['r', articleUrl]] : [],
+  };
+
+  try {
+    await signEvent(event, _privKeyHex);
+    // Broadcast to a default relay (wss://relay.damus.io)
+    const relayUrl = 'wss://relay.damus.io';
+    const ws = new WebSocket(relayUrl);
+    await new Promise((resolve, reject) => {
+      const timeout = setTimeout(() => { ws.close(); reject(new Error('Relay timeout')); }, 8000);
+      ws.onopen = () => {
+        ws.send(JSON.stringify(['EVENT', event]));
+      };
+      ws.onmessage = (m) => {
+        try {
+          const msg = JSON.parse(m.data);
+          if (msg[0] === 'OK') {
+            clearTimeout(timeout);
+            ws.close();
+            resolve();
+          }
+        } catch {}
+      };
+      ws.onerror = () => { clearTimeout(timeout); reject(new Error('WebSocket error')); };
+    });
+    toast('Published to Nostr ✓ — visible on all Nostr clients', 'success');
+  } catch (err) {
+    toast('Nostr publish failed: ' + err.message, 'error');
+  }
+}
+
+async function renderAnnotationsPanel(articleId) {
+  const list = document.getElementById('annotations-list');
+  const all = await dbGetAll('annotations');
+  const anns = all.filter(a => a.articleId === articleId).sort((a,b) => b.savedAt - a.savedAt);
+  if (!anns.length) {
+    list.innerHTML = '<p style="font-size:.82em;color:var(--text-muted);padding:12px">No annotations yet. Select text to add a note.</p>';
+    return;
+  }
+  list.innerHTML = '';
+  for (const ann of anns) {
+    const card = document.createElement('div');
+    card.className = 'annotation-card';
+    card.innerHTML = `
+      <div class="annotation-quote">${escHtml(ann.quote)}</div>
+      <div class="annotation-note">${escHtml(ann.note)}</div>
+      <div class="annotation-actions">
+        <button class="ghost" style="font-size:.75em" onclick="deleteAnnotation('${ann.id}')">Delete</button>
+      </div>`;
+    list.appendChild(card);
+  }
+}
+
+async function deleteAnnotation(id) {
+  if (!confirm('Delete this annotation?')) return;
+  await dbDelete('annotations', id);
+  if (appState.currentArticleId) renderAnnotationsPanel(appState.currentArticleId);
+  await syncNow(true);
+}
+
+function toggleAnnotationsPanel() {
+  const panel = document.getElementById('annotations-panel');
+  panel.classList.toggle('visible');
+  if (panel.classList.contains('visible') && appState.currentArticleId) {
+    renderAnnotationsPanel(appState.currentArticleId);
+  }
+}
+
+/* ============================================================
+   CONTEXT MENU (right-click on feed)
+   ============================================================ */
+function showContextMenu(e, feedId) {
+  appState.contextFeedId = feedId;
+  const menu = document.getElementById('context-menu');
+  menu.classList.add('visible');
+  menu.style.left = Math.min(e.clientX, window.innerWidth - 180) + 'px';
+  menu.style.top  = Math.min(e.clientY, window.innerHeight - 160) + 'px';
+}
+
+document.addEventListener('click', () => document.getElementById('context-menu').classList.remove('visible'));
+
+async function ctxRefreshFeed() {
+  const feed = appState.feeds.find(f => f.id === appState.contextFeedId);
+  if (!feed) return;
+  toast('Refreshing…', 'info');
+  await refreshFeed(feed);
+  appState.articles = await dbGetAll('articles');
+  buildSearchIndex(appState.articles);
+  renderFeedList();
+  renderArticleList();
+  toast('Feed refreshed', 'success');
+}
+
+async function ctxMarkAllRead() {
+  const articles = await dbGetAll('articles', 'feedId', appState.contextFeedId);
+  for (const a of articles) { a.read = true; await dbPut('articles', a); }
+  appState.articles = await dbGetAll('articles');
+  renderFeedList();
+  renderArticleList();
+  await syncNow(true);
+}
+
+function ctxEditFeed() {
+  const feed = appState.feeds.find(f => f.id === appState.contextFeedId);
+  if (!feed) return;
+  document.getElementById('edit-feed-id').value = feed.id;
+  document.getElementById('edit-feed-url').value = feed.url;
+  document.getElementById('edit-feed-title').value = feed.title;
+  showModal('modal-edit-feed');
+}
+
+async function saveEditFeed() {
+  const id    = document.getElementById('edit-feed-id').value;
+  const url   = document.getElementById('edit-feed-url').value.trim();
+  const title = document.getElementById('edit-feed-title').value.trim();
+  if (!url || !title) return;
+  const feed = await dbGet('feeds', id);
+  if (!feed) return;
+  feed.url = url;
+  feed.title = title;
+  feed.customTitle = true;
+  await dbPut('feeds', feed);
+  appState.feeds = await dbGetAll('feeds');
+  renderFeedList();
+  closeModal('modal-edit-feed');
+}
+
+function ctxDeleteFeed() {
+  deleteFeed(appState.contextFeedId);
+}
+
+/* ============================================================
+   PREFERENCES / APPEARANCE
+   ============================================================ */
+function setTheme(theme) {
+  document.documentElement.dataset.theme = theme;
+  document.querySelector('#theme-light-btn')?.classList.toggle('active', theme === 'light');
+  document.querySelector('#theme-dark-btn')?.classList.toggle('active', theme === 'dark');
+  setSetting('theme', theme);
+}
+function toggleDarkMode() {
+  const cur = document.documentElement.dataset.theme;
+  setTheme(cur === 'dark' ? 'light' : 'dark');
+}
+function setFontSize(size) {
+  document.documentElement.dataset.fontSize = size;
+  document.querySelectorAll('.toggle-btn[data-size]').forEach(b => b.classList.toggle('active', b.dataset.size === size));
+  setSetting('fontSize', size);
+}
+function setFontFamily(family) {
+  document.documentElement.dataset.fontFamily = family;
+  document.querySelectorAll('.toggle-btn[data-family]').forEach(b => b.classList.toggle('active', b.dataset.family === family));
+  setSetting('fontFamily', family);
+}
+
+async function applyPreferences() {
+  const theme  = await getSetting('theme', 'light');
+  const fsize  = await getSetting('fontSize', 'medium');
+  const ffam   = await getSetting('fontFamily', 'serif');
+  appState.corsProxy       = await getSetting('corsProxy', 'https://api.allorigins.win/raw?url=');
+  appState.refreshInterval = parseInt(await getSetting('refreshInterval', '30'), 10);
+  setTheme(theme);
+  setFontSize(fsize);
+  setFontFamily(ffam);
+  document.getElementById('cors-proxy-input').value = appState.corsProxy;
+  document.getElementById('refresh-interval-input').value = appState.refreshInterval;
+  document.getElementById('theme-light-btn')?.classList.toggle('active', theme === 'light');
+  document.getElementById('theme-dark-btn')?.classList.toggle('active', theme === 'dark');
+}
+
+function showSettings() {
+  applyPreferences(); // re-read values
+  renderBlossomServerList();
+  showModal('settings-modal');
+}
+
+async function saveSettings() {
+  const corsProxy     = document.getElementById('cors-proxy-input').value.trim();
+  const refreshInterv = parseInt(document.getElementById('refresh-interval-input').value, 10);
+  await setSetting('corsProxy', corsProxy);
+  await setSetting('refreshInterval', refreshInterv || 30);
+  appState.corsProxy       = corsProxy;
+  appState.refreshInterval = refreshInterv || 30;
+  startAutoRefresh();
+  closeModal('settings-modal');
+  toast('Settings saved', 'success');
+}
+
+/* ============================================================
+   AUTO REFRESH
+   ============================================================ */
+function startAutoRefresh() {
+  clearInterval(appState.refreshTimer);
+  if (appState.refreshInterval > 0) {
+    appState.refreshTimer = setInterval(() => {
+      if (navigator.onLine) refreshAllFeeds();
+    }, appState.refreshInterval * 60000);
+  }
+}
+
+/* ============================================================
+   MODALS
+   ============================================================ */
+function showModal(id) {
+  document.getElementById(id).classList.add('visible');
+}
+function closeModal(id) {
+  document.getElementById(id).classList.remove('visible');
+}
+
+// Close modal on overlay click
+document.querySelectorAll('.modal-overlay').forEach(overlay => {
+  overlay.addEventListener('click', e => {
+    if (e.target === overlay) overlay.classList.remove('visible');
+  });
+});
+
+/* ============================================================
+   TOAST NOTIFICATIONS
+   ============================================================ */
+function toast(msg, type = 'info') {
+  const container = document.getElementById('toast-container');
+  const el = document.createElement('div');
+  el.className = `toast ${type}`;
+  el.textContent = msg;
+  container.appendChild(el);
+  setTimeout(() => { el.style.opacity = '0'; el.style.transition = 'opacity .3s'; setTimeout(() => el.remove(), 300); }, 3000);
+}
+
+/* ============================================================
+   PROGRESS BAR
+   ============================================================ */
+function setProgress(pct) {
+  const bar = document.getElementById('sync-progress-bar');
+  bar.style.width = pct + '%';
+}
+
+/* ============================================================
+   OFFLINE DETECTION
+   ============================================================ */
+function updateOnlineStatus() {
+  const banner = document.getElementById('offline-banner');
+  banner.classList.toggle('visible', !navigator.onLine);
+}
+window.addEventListener('online',  updateOnlineStatus);
+window.addEventListener('offline', updateOnlineStatus);
+
+/* ============================================================
+   KEYBOARD SHORTCUTS
+   ============================================================ */
+document.addEventListener('keydown', e => {
+  if (e.target.tagName === 'INPUT' || e.target.tagName === 'TEXTAREA') return;
+  if (e.key === 'n') showAddFeedModal();
+  if (e.key === 's') syncNow();
+  if (e.key === 'r') refreshAllFeeds();
+  if (e.key === 'm') toggleCurrentRead();
+  if (e.key === 'Escape') {
+    cancelAnnotation();
+    dismissTooltip();
+    document.querySelectorAll('.modal-overlay.visible').forEach(m => m.classList.remove('visible'));
+    document.getElementById('context-menu').classList.remove('visible');
+  }
+});
+
+/* ============================================================
+   TAGS / FOLDER SYSTEM
+   ============================================================ */
+const TAG_COLORS = ['#2563eb','#16a34a','#dc2626','#d97706','#9333ea','#0891b2','#be185d','#0f766e'];
+let _tagsPanelCollapsed = false;
+
+function toggleTagsPanel() {
+  _tagsPanelCollapsed = !_tagsPanelCollapsed;
+  const panel = document.getElementById('tags-panel');
+  const btn   = document.getElementById('tags-collapse-btn');
+  panel.classList.toggle('collapsed', _tagsPanelCollapsed);
+  btn.querySelector('polyline').setAttribute('points', _tagsPanelCollapsed ? '9 18 15 12 9 6' : '15 18 9 12 15 6');
+}
+
+async function getTags() {
+  return (await getSetting('userTags', [])) || [];
+}
+async function saveTags(tags) {
+  await setSetting('userTags', tags);
+}
+
+async function addTag() {
+  const input = document.getElementById('new-tag-input');
+  const name  = input.value.trim();
+  if (!name) return;
+  const tags = await getTags();
+  if (tags.find(t => t.name.toLowerCase() === name.toLowerCase())) {
+    toast('Tag already exists', 'info');
+    return;
+  }
+  const color = TAG_COLORS[tags.length % TAG_COLORS.length];
+  const id = 'tag::' + Date.now() + '::' + Math.random().toString(36).slice(2);
+  tags.push({ id, name, color });
+  await saveTags(tags);
+  input.value = '';
+  renderTagsList();
+  await syncNow(true);
+}
+
+async function deleteTag(tagId) {
+  if (!confirm('Delete this tag? It will be removed from all articles.')) return;
+  const tags = (await getTags()).filter(t => t.id !== tagId);
+  await saveTags(tags);
+  // Remove from all articles
+  const articles = await dbGetAll('articles');
+  for (const a of articles) {
+    if (a.tags && a.tags.includes(tagId)) {
+      a.tags = a.tags.filter(id => id !== tagId);
+      await dbPut('articles', a);
+    }
+  }
+  appState.articles = await dbGetAll('articles');
+  renderTagsList();
+  renderArticleList();
+  await syncNow(true);
+}
+
+async function renderTagsList() {
+  const tags = await getTags();
+  const container = document.getElementById('user-tags-list');
+  container.innerHTML = '';
+  // Count articles per tag
+  const articles = await dbGetAll('articles');
+  const tagCounts = {};
+  for (const a of articles) if (a.tags) for (const tid of a.tags) tagCounts[tid] = (tagCounts[tid]||0)+1;
+
+  for (const tag of tags) {
+    const div = document.createElement('div');
+    div.className = 'tag-item' + (appState.currentTagId === tag.id ? ' active' : '');
+    div.dataset.tagId = tag.id;
+    div.innerHTML = `
+      <div class="tag-dot" style="background:${tag.color}"></div>
+      <span class="tag-name">${escHtml(tag.name)}</span>
+      <span class="tag-count">${tagCounts[tag.id] || 0}</span>`;
+    div.addEventListener('click', () => selectTag(tag.id, div));
+    div.addEventListener('contextmenu', e => { e.preventDefault(); ctxDeleteTagMenu(e, tag.id); });
+    container.appendChild(div);
+  }
+}
+
+function ctxDeleteTagMenu(e, tagId) {
+  if (confirm('Delete this tag?')) deleteTag(tagId);
+}
+
+function selectTag(tagId, el) {
+  appState.currentTagId = tagId;
+  document.querySelectorAll('.tag-item').forEach(t => t.classList.remove('active'));
+  el?.classList.add('active');
+
+  if (tagId === 'TODAY' || tagId === 'WEEK') {
+    showDigest(tagId);
+    return;
+  }
+
+  // Filter article list by tag
+  appState.currentFeedId = '__tag__';
+  appState.currentTagId  = tagId;
+  document.querySelectorAll('.feed-item').forEach(f => f.classList.remove('active'));
+  document.getElementById('list-title').textContent = 'Tag: ' + (document.querySelector(`.tag-item[data-tag-id="${tagId}"] .tag-name`)?.textContent || '');
+  renderArticleListByTag(tagId);
+}
+
+async function renderArticleListByTag(tagId) {
+  const all = await dbGetAll('articles');
+  const filtered = all.filter(a => a.tags && a.tags.includes(tagId));
+  // Reuse existing list render with injected articles
+  const container = document.getElementById('article-list');
+  if (!filtered.length) {
+    container.innerHTML = '<div id="list-empty" style="padding:40px 20px;text-align:center;color:var(--text-muted);font-size:.9em">No articles with this tag yet.</div>';
+    return;
+  }
+  const sorted = [...filtered].sort((a,b) => new Date(b.pubDate||b.savedAt)-new Date(a.pubDate||a.savedAt));
+  const frag = document.createDocumentFragment();
+  for (const article of sorted) {
+    const div = document.createElement('div');
+    div.className = 'article-item' + (article.read ? ' read' : '') + (article.id === appState.currentArticleId ? ' active' : '');
+    div.dataset.id = article.id;
+    const date = formatDate(article.pubDate);
+    div.innerHTML = `${!article.read ? '<span class="unread-dot"></span>' : ''}
+      <div class="article-item-feed">${escHtml(article.feedTitle||'')}</div>
+      <div class="article-item-title">${escHtml(article.title)}</div>
+      <div class="article-item-meta"><span>${date}</span></div>`;
+    div.addEventListener('click', () => openArticle(article.id));
+    frag.appendChild(div);
+  }
+  container.innerHTML = '';
+  container.appendChild(frag);
+}
+
+/* TAG ASSIGNMENT */
+let _tagAssignArticleId = null;
+async function showTagAssignModal(articleId) {
+  _tagAssignArticleId = articleId;
+  const article = appState.articles.find(a => a.id === articleId);
+  const currentTags = (article && article.tags) ? article.tags : [];
+  const tags = await getTags();
+  const list = document.getElementById('tag-assign-list');
+  list.innerHTML = '';
+  for (const tag of tags) {
+    const label = document.createElement('label');
+    label.innerHTML = `<input type="checkbox" value="${tag.id}" ${currentTags.includes(tag.id)?'checked':''}> <div class="tag-dot" style="background:${tag.color};display:inline-block;margin-right:4px"></div> ${escHtml(tag.name)}`;
+    list.appendChild(label);
+  }
+  if (!tags.length) list.innerHTML = '<p style="font-size:.85em;color:var(--text-muted)">No tags yet. Create one in the Tags panel.</p>';
+  showModal('modal-tag-assign');
+}
+
+async function saveTagAssignment() {
+  if (!_tagAssignArticleId) return;
+  const checked = [...document.querySelectorAll('#tag-assign-list input:checked')].map(i => i.value);
+  const article = await dbGet('articles', _tagAssignArticleId);
+  if (!article) return;
+  article.tags = checked;
+  await dbPut('articles', article);
+  appState.articles = await dbGetAll('articles');
+  renderArticleList();
+  renderTagsList();
+  closeModal('modal-tag-assign');
+  await syncNow(true);
+}
+
+let _ctxArticleId = null;
+function showArticleContextMenu(e, articleId) {
+  _ctxArticleId = articleId;
+  const menu = document.getElementById('article-ctx-menu');
+  menu.style.display = 'block';
+  menu.style.left = Math.min(e.clientX, window.innerWidth - 180) + 'px';
+  menu.style.top  = Math.min(e.clientY, window.innerHeight - 100) + 'px';
+}
+function ctxTagArticle()       { document.getElementById('article-ctx-menu').style.display='none'; showTagAssignModal(_ctxArticleId||appState.currentArticleId); }
+function ctxSummarizeArticle() { document.getElementById('article-ctx-menu').style.display='none'; generateSummary(_ctxArticleId||appState.currentArticleId); }
+
+document.addEventListener('click', () => { document.getElementById('article-ctx-menu').style.display='none'; });
+
+/* ============================================================
+   TODAY / THIS WEEK DIGEST
+   ============================================================ */
+async function showDigest(period) {
+  const now   = Date.now();
+  const cutoff = period === 'TODAY' ? now - 86400000 : now - 604800000;
+  const articles = (await dbGetAll('articles')).filter(a => {
+    const d = new Date(a.pubDate || a.savedAt).getTime();
+    return d >= cutoff;
+  });
+
+  const title = period === 'TODAY' ? 'Today' : 'This Week';
+  document.getElementById('digest-modal-title').textContent = title;
+  document.getElementById('digest-modal-desc').textContent =
+    `${articles.length} article${articles.length !== 1 ? 's' : ''} ${period === 'TODAY' ? 'in the last 24 hours' : 'in the last 7 days'}`;
+
+  const list = document.getElementById('digest-list');
+  list.innerHTML = '';
+  if (!articles.length) {
+    list.innerHTML = '<li style="cursor:default">No articles yet for this period.</li>';
+    showModal('modal-digest');
+    return;
+  }
+
+  for (const a of [...articles].sort((x,y) => new Date(y.pubDate||y.savedAt)-new Date(x.pubDate||x.savedAt))) {
+    const li = document.createElement('li');
+    const summary = a.summary ? a.summary : escHtml(a.title);
+    li.innerHTML = `<span>${summary}</span>`;
+    li.title = a.title;
+    li.addEventListener('click', () => {
+      closeModal('modal-digest');
+      openArticle(a.id);
+      // Scroll list to article
+      document.querySelectorAll('.feed-item').forEach(f => f.classList.remove('active'));
+      const allItem = document.querySelector('[data-feed="all"]');
+      if (allItem) { allItem.classList.add('active'); appState.currentFeedId = 'all'; }
+      renderArticleList();
+      setTimeout(() => openArticle(a.id), 100);
+    });
+    list.appendChild(li);
+  }
+  showModal('modal-digest');
+}
+
+/* ============================================================
+   LOCAL LLM SUMMARIES
+   ============================================================ */
+async function getLLMConfig() {
+  return {
+    endpoint: await getSetting('llmEndpoint', ''),
+    model:    await getSetting('llmModel', 'llama3.2'),
+    apiKey:   await getSetting('llmApiKey', ''),
+    prompt:   await getSetting('llmPrompt', 'Summarize this article in 2-3 concise sentences. Focus on the key facts and main takeaway.'),
+  };
+}
+
+async function saveLLMSettings() {
+  const endpoint = document.getElementById('llm-endpoint').value.trim();
+  const model    = document.getElementById('llm-model').value.trim();
+  const apiKey   = document.getElementById('llm-apikey').value.trim();
+  const prompt   = document.getElementById('llm-system-prompt').value.trim();
+  await setSetting('llmEndpoint', endpoint);
+  await setSetting('llmModel', model);
+  await setSetting('llmApiKey', apiKey);
+  await setSetting('llmPrompt', prompt);
+  updateLLMStatus(endpoint, model);
+  closeModal('modal-llm-settings');
+  toast('LLM settings saved', 'success');
+}
+
+async function updateLLMStatus(endpoint, model) {
+  const el = document.getElementById('llm-status-text');
+  if (!el) return;
+  if (!endpoint) { el.textContent = 'not configured'; return; }
+  const hostname = (() => { try { return new URL(endpoint).hostname; } catch { return endpoint; } })();
+  el.textContent = `${model || '?'} @ ${hostname}`;
+}
+
+async function showLLMSettings() {
+  const cfg = await getLLMConfig();
+  document.getElementById('llm-endpoint').value = cfg.endpoint;
+  document.getElementById('llm-model').value    = cfg.model;
+  document.getElementById('llm-apikey').value   = cfg.apiKey;
+  document.getElementById('llm-system-prompt').value = cfg.prompt;
+  document.getElementById('llm-test-result').textContent = '';
+  showModal('modal-llm-settings');
+}
+
+async function testLLMConnection() {
+  const r = document.getElementById('llm-test-result');
+  r.textContent = 'Testing…';
+  try {
+    const cfg = await getLLMConfig();
+    const endpoint = document.getElementById('llm-endpoint').value.trim();
+    const model    = document.getElementById('llm-model').value.trim();
+    const apiKey   = document.getElementById('llm-apikey').value.trim();
+    const resp = await callLLM('Reply with just the word: pong', 'ping', endpoint, model, apiKey);
+    r.style.color = 'var(--green-dark)';
+    r.textContent = '✓ Connected — response: ' + resp.slice(0, 60);
+  } catch (err) {
+    r.style.color = 'var(--danger)';
+    r.textContent = '✗ Failed: ' + err.message;
+  }
+}
+
+async function callLLM(systemPrompt, userContent, endpointOverride, modelOverride, apiKeyOverride) {
+  const cfg      = await getLLMConfig();
+  const endpoint = endpointOverride ?? cfg.endpoint;
+  const model    = modelOverride    ?? cfg.model;
+  const apiKey   = apiKeyOverride   ?? cfg.apiKey;
+  if (!endpoint) throw new Error('LLM endpoint not configured. Open Tags panel → ⚙');
+
+  // Warn early about the most common silent failure: an https page calling http://localhost.
+  if (location.protocol === 'https:' && endpoint.startsWith('http://')) {
+    throw new Error('Mixed content blocked: this page is HTTPS but the endpoint is HTTP. Run WebRSS over http://localhost, or use an HTTPS proxy in front of your LLM. (See the setup note in LLM settings.)');
+  }
+
+  let resp;
+  try {
+    resp = await fetch(endpoint, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        ...(apiKey ? { 'Authorization': 'Bearer ' + apiKey } : {}),
+      },
+      body: JSON.stringify({
+        model,
+        messages: [
+          { role: 'system', content: systemPrompt },
+          { role: 'user',   content: userContent },
+        ],
+        max_tokens: 200,
+        temperature: 0.3,
+        stream: false,
+      }),
+    });
+  } catch (netErr) {
+    // TypeError: Failed to fetch usually means CORS, mixed-content, or the
+    // server is unreachable — none of which give a useful status code.
+    throw new Error('Could not reach the LLM. Likely causes: the server is not running, CORS is not enabled (start Ollama with OLLAMA_ORIGINS=*), or mixed-content blocking. See the setup note in LLM settings.');
+  }
+  if (!resp.ok) {
+    const txt = await resp.text().catch(() => '');
+    throw new Error(`LLM HTTP ${resp.status}: ${txt.slice(0,120)}`);
+  }
+  const data = await resp.json();
+  // OpenAI-compatible response
+  return data.choices?.[0]?.message?.content?.trim() || JSON.stringify(data).slice(0,200);
+}
+
+async function generateSummary(articleId) {
+  const id = articleId || appState.currentArticleId;
+  if (!id) { toast('Open an article first', 'info'); return; }
+  const article = await dbGet('articles', id);
+  if (!article) return;
+
+  const bar  = document.getElementById('article-summary-bar');
+  const text = document.getElementById('summary-text');
+  const btn  = document.getElementById('summary-generate-btn');
+
+  bar.classList.add('visible');
+  text.textContent = 'Generating summary…';
+  if (btn) { btn.disabled = true; btn.textContent = '…'; }
+
+  try {
+    const cfg = await getLLMConfig();
+    const articleText = stripHtml(article.content || '') || article.title;
+    const truncated = articleText.slice(0, 4000); // keep prompt manageable
+    const summary = await callLLM(cfg.prompt, 'Article title: ' + article.title + '\n\n' + truncated);
+    article.summary = summary;
+    await dbPut('articles', article);
+    // Update in-memory state
+    const idx = appState.articles.findIndex(a => a.id === id);
+    if (idx >= 0) appState.articles[idx].summary = summary;
+    text.textContent = summary;
+    await syncNow(true);
+  } catch (err) {
+    text.textContent = 'Summary failed: ' + err.message;
+  } finally {
+    if (btn) { btn.disabled = false; btn.textContent = '✨ Summarize'; }
+  }
+}
+
+/* ============================================================
+   Enhanced openArticle: show summary bar if summary exists
+   ============================================================ */
+const _origOpenArticle = openArticle;
+openArticle = async function(articleId) {
+  await _origOpenArticle(articleId);
+  const article = await dbGet('articles', articleId);
+  const bar  = document.getElementById('article-summary-bar');
+  const text = document.getElementById('summary-text');
+  if (article && article.summary) {
+    bar.classList.add('visible');
+    text.textContent = article.summary;
+  } else {
+    bar.classList.remove('visible');
+  }
+};
+
+/* ============================================================
+   SERVICE WORKER REGISTRATION
+   ============================================================ */
+if ('serviceWorker' in navigator) {
+  window.addEventListener('load', () => {
+    // Relative path so registration scope matches the app's subpath on GitHub Pages.
+    navigator.serviceWorker.register('./sw.js').catch(err => console.warn('SW reg failed:', err));
+  });
+}
+
+/* ============================================================
+   BOOT
+   ============================================================ */
+(async function boot() {
+  await openDB();
+
+  // Check if already logged in
+  const savedPriv = await getSetting('privKey', null);
+  if (savedPriv) {
+    try {
+      await whenSecpReady();        // wait for the crypto module
+      await startSession(savedPriv);
+    } catch (e) {
+      // Offline and library not cached yet — let the user retry from the login screen.
+      console.warn(e.message);
+      toast('Could not load crypto library (offline?). Reload when back online.', 'error');
+    }
+  }
+
+  updateOnlineStatus();
+})();
+</script>
+</body>
+</html>
